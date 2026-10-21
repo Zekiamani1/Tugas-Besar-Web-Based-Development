@@ -3,9 +3,9 @@ package migration
 import (
 	"context"
 
-	"wbd/internal/service/interfaces"
-
 	"gorm.io/gorm"
+	"wbd/internal/models"
+	"wbd/internal/service/interfaces"
 )
 
 type Service struct {
@@ -28,15 +28,15 @@ func (s *Service) UpdateDraft(ctx context.Context, targetDBID, migrationID int, 
 	return nil
 }
 
-func (s *Service) GetMigrationDetail(ctx context.Context, targetDBID, migrationID int) (*MigrationRecord, error) {
+func (s *Service) GetMigrationDetail(ctx context.Context, targetDBID, migrationID int) (*models.MigrationRecord, error) {
 	return nil, nil
 }
 
-func (s *Service) GetLinearHistory(ctx context.Context, targetDBID int) ([]MigrationRecord, error) {
+func (s *Service) GetLinearHistory(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error) {
 	return nil, nil
 }
 
-func (s *Service) ExecuteMigration(ctx context.Context, targetDBID, migrationID, userID int) (*MigrationRecord, error) {
+func (s *Service) ExecuteMigration(ctx context.Context, targetDBID, migrationID int, token string) (*models.MigrationRecord, error) {
 	//get target db connection using dbmanagement's gettargetconnection and execute migration in transaction
 	return nil, nil
 }

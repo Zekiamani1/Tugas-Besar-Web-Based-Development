@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"gorm.io/gorm"
+	"wbd/internal/models"
 )
 
 type Service struct {
@@ -19,8 +20,8 @@ func NewService(internalDB *gorm.DB) *Service {
 	}
 }
 
-func (s *Service) RegisterTargetDB(ctx context.Context, info TargetDBInfo) error {
-	return nil
+func (s *Service) RegisterTargetDB(ctx context.Context, info models.TargetDBInfo) (int, error) {
+	return 0, nil
 }
 
 func (s *Service) GetTargetConnection(ctx context.Context, targetDBID int) (*sql.DB, error) {
@@ -35,8 +36,8 @@ func (s *Service) GetTables(ctx context.Context, targetDBID int, schema string) 
 	return nil, nil
 }
 
-func (s *Service) GetTableDetails(ctx context.Context, targetDBID int, schema, tableName string) (string, error) {
-	return "", nil
+func (s *Service) GetTableDetails(ctx context.Context, targetDBID int, schema, tableName string) (*models.TableMetadata, error) {
+	return nil, nil
 }
 
 func (s *Service) GetTableData(ctx context.Context, targetDBID int, schema, tableName string, limit, offset int) ([]map[string]any, error) {

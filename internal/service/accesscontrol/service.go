@@ -18,8 +18,8 @@ func (s *Service) Register(ctx context.Context, username, password string) error
 	return nil
 }
 
-func (s *Service) Login(ctx context.Context, username, password string) (*string, error) {
-	return nil, nil
+func (s *Service) Login(ctx context.Context, username, password string) (string, error) {
+	return "", nil
 }
 
 func (s *Service) Logout(ctx context.Context, sessionID string) error {
