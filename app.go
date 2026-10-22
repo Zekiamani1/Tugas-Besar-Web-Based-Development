@@ -1,6 +1,7 @@
 package main
 
 import (
+	"html/template"
 	"net/http"
 
 	"wbd/internal/middleware"
@@ -25,7 +26,9 @@ func NewApp(
 		MigrationService:     migSvc,
 		ServeMux:             http.NewServeMux(),
 	}
-
+	app.HandleFunc("GET /login", app.handleLoginPage)
+	app.Handle("GET /dashboard", middleware.RequireAuth(app, app.handleDashboard))
+	app.Handle("GET /admin", middleware.RequireAdminAccess(app, app.handleAdminPage))
 	app.HandleFunc("POST /login", app.handleLogin)
 	app.Handle("POST /logout", middleware.RequireAuth(app, app.handleLogout))
 	app.Handle("POST /admin/users", middleware.RequireAdminAccess(app, app.handleRegisterUser))
@@ -45,7 +48,21 @@ func NewApp(
 
 	return app
 }
+func (app *App) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "web/static/login.html")
+}
+func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "web/static/dashboard.html")
+}
 
+func (app *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
+	tmpl, err := template.ParseFiles("web/templates/admin.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, "")
+}
 func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	//handle login using access control's login
 }
