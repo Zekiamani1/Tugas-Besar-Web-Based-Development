@@ -4,6 +4,7 @@ import "time"
 
 type TargetDBInfo struct {
 	Name     string
+	DBType   string
 	Host     string
 	Port     int
 	User     string

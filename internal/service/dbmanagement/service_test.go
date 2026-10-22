@@ -45,6 +45,7 @@ func TestConnectionManagement(t *testing.T) {
 
 		dbID, err := svc.RegisterTargetDB(ctx, models.TargetDBInfo{
 			Name:     "production_pg",
+			DBType:   "postgres",
 			Host:     "localhost",
 			Port:     5432,
 			User:     "postgres",
@@ -60,9 +61,16 @@ func TestConnectionManagement(t *testing.T) {
 	})
 
 	t.Run("GetTargetConnection", func(t *testing.T) {
+		targetDB, targetMock, err := sqlmock.NewWithDSN("sqlmock://postgres:secret@localhost:5432/prod_db?sslmode=disable")
+		if err != nil {
+			t.Fatalf("failed to create target sqlmock: %v", err)
+		}
+		targetMock.ExpectClose()
+		defer targetDB.Close()
+
 		internalMock.ExpectQuery(`SELECT .*`).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "host", "port", "user", "password", "db_name"}).
-				AddRow(1, "production_pg", "localhost", 5432, "postgres", "secret", "prod_db"))
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "db_type", "host", "port", "user", "password", "db_name"}).
+				AddRow(1, "production_pg", "sqlmock", "localhost", 5432, "postgres", "secret", "prod_db"))
 
 		conn, err := svc.GetTargetConnection(ctx, 1)
 		if err != nil || conn == nil {
@@ -90,7 +98,7 @@ func TestDatabaseInformation(t *testing.T) {
 	internalDB, internalMock, rawInternalDB := newMockGormDB(t)
 	defer rawInternalDB.Close()
 
-	targetDB, targetMock, err := sqlmock.New()
+	targetDB, targetMock, err := sqlmock.NewWithDSN("sqlmock://postgres:secret@localhost:5432/prod_db?sslmode=disable")
 	if err != nil {
 		t.Fatalf("failed to create target sqlmock: %v", err)
 	}
@@ -100,8 +108,8 @@ func TestDatabaseInformation(t *testing.T) {
 
 	t.Run("GetSchemas", func(t *testing.T) {
 		internalMock.ExpectQuery(`SELECT .*`).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "host", "port", "user", "password", "db_name"}).
-				AddRow(1, "production_pg", "localhost", 5432, "postgres", "secret", "prod_db"))
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "db_type", "host", "port", "user", "password", "db_name"}).
+				AddRow(1, "production_pg", "sqlmock", "localhost", 5432, "postgres", "secret", "prod_db"))
 
 		targetMock.ExpectQuery(regexp.QuoteMeta(`SELECT schema_name FROM information_schema.schemata`)).
 			WillReturnRows(sqlmock.NewRows([]string{"schema_name"}).
@@ -119,8 +127,8 @@ func TestDatabaseInformation(t *testing.T) {
 
 	t.Run("GetTables", func(t *testing.T) {
 		internalMock.ExpectQuery(`SELECT .*`).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "host", "port", "user", "password", "db_name"}).
-				AddRow(1, "production_pg", "localhost", 5432, "postgres", "secret", "prod_db"))
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "db_type", "host", "port", "user", "password", "db_name"}).
+				AddRow(1, "production_pg", "sqlmock", "localhost", 5432, "postgres", "secret", "prod_db"))
 
 		targetMock.ExpectQuery(regexp.QuoteMeta(`SELECT table_name FROM information_schema.tables`)).
 			WithArgs("public").
@@ -139,8 +147,8 @@ func TestDatabaseInformation(t *testing.T) {
 
 	t.Run("GetTableDetails", func(t *testing.T) {
 		internalMock.ExpectQuery(`SELECT .*`).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "host", "port", "user", "password", "db_name"}).
-				AddRow(1, "production_pg", "localhost", 5432, "postgres", "secret", "prod_db"))
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "db_type", "host", "port", "user", "password", "db_name"}).
+				AddRow(1, "production_pg", "sqlmock", "localhost", 5432, "postgres", "secret", "prod_db"))
 
 		targetMock.ExpectQuery(regexp.QuoteMeta(`SELECT column_name, data_type, is_nullable FROM information_schema.columns`)).
 			WithArgs("public", "users").
@@ -178,8 +186,8 @@ func TestDatabaseInformation(t *testing.T) {
 
 	t.Run("GetTableData", func(t *testing.T) {
 		internalMock.ExpectQuery(`SELECT .*`).
-			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "host", "port", "user", "password", "db_name"}).
-				AddRow(1, "production_pg", "localhost", 5432, "postgres", "secret", "prod_db"))
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "db_type", "host", "port", "user", "password", "db_name"}).
+				AddRow(1, "production_pg", "sqlmock", "localhost", 5432, "postgres", "secret", "prod_db"))
 
 		targetMock.ExpectQuery(`SELECT \* FROM "public"\."users" LIMIT \$1 OFFSET \$2`).
 			WithArgs(10, 0).

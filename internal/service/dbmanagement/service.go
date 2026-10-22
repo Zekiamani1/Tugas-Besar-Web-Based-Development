@@ -33,7 +33,7 @@ func (s *Service) RegisterTargetDB(ctx context.Context, info models.TargetDBInfo
 func (s *Service) GetTargetConnection(ctx context.Context, targetDBID int) (*sql.DB, error) {
 	var info models.TargetDBInfo
 	s.internalDB.Model(&models.TargetDBInfo{}).Where("id = ?", targetDBID).Scan(&info)
-	conn, err := sql.Open("postgres", fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", info.User, info.Password, info.Host, strconv.Itoa(info.Port), info.DBName))
+	conn, err := sql.Open(info.DBType, fmt.Sprintf("%s://%s:%s@%s:%s/%s?sslmode=disable", info.DBType, info.User, info.Password, info.Host, strconv.Itoa(info.Port), info.DBName))
 	return conn, err
 }
 
