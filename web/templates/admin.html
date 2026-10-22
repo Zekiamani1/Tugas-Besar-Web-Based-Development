@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head><title>Admin Panel</title></head>
+<body>
+	<h1>Admin Panel</h1>
+	<a href="/dashboard">Back to Dashboard</a>
+	{{if .}}
+	<p>{{.}}</p>
+	{{end}}
+
+	<h2>Register User</h2>
+	<form method="POST" action="/admin/users">
+		<input type="text" name="username" placeholder="Username">
+		<input type="password" name="password" placeholder="Password">
+		<button type="submit">Register User</button>
+	</form>
+
+	<h2>Create Group</h2>
+	<form method="POST" action="/admin/groups">
+		<input type="text" name="group_name" placeholder="Group Name">
+		<button type="submit">Create Group</button>
+	</form>
+
+	<h2>Assign User to Group</h2>
+	<form method="POST" action="/admin/groups/members">
+		<input type="number" name="user_id" placeholder="User ID">
+		<input type="number" name="group_id" placeholder="Group ID">
+		<button type="submit">Assign</button>
+	</form>
+
+	<h2>Set Group DB Access</h2>
+	<form method="POST" action="/admin/groups/permissions">
+		<input type="number" name="group_id" placeholder="Group ID">
+		<input type="number" name="target_db_id" placeholder="Target DB ID">
+		<input type="text" name="access_level" placeholder="Access Level">
+		<button type="submit">Set Access</button>
+	</form>
+
+	<h2>Register Target Database</h2>
+	<form method="POST" action="/admin/databases">
+		<input type="text" name="name" placeholder="Name">
+		<input type="text" name="db_type" placeholder="DB Type">
+		<input type="text" name="host" placeholder="Host">
+		<input type="number" name="port" placeholder="Port">
+		<input type="text" name="user" placeholder="User">
+		<input type="password" name="password" placeholder="Password">
+		<input type="text" name="db_name" placeholder="DB Name">
+		<button type="submit">Register Database</button>
+	</form>
+</body>
+</html>

@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head><title>Migration Detail</title></head>
+<body>
+	<h1>Migration #{{.ID}}</h1>
+	<a href="/databases/{{.TargetDBID}}/migrations">Back to Migrations</a>
+	<p>TargetDBID: {{.TargetDBID}}</p>
+	<p>Version: {{.Version}}</p>
+	<p>Status: {{.Status}}</p>
+	<p>ExecutedBy: {{.ExecutedBy}}</p>
+	<pre>{{.SQLQuery}}</pre>
+
+	<h2>Execute Migration</h2>
+	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/execute">
+		<input type="text" name="token" placeholder="Execution Token">
+		<button type="submit">Execute</button>
+	</form>
+</body>
+</html>
