@@ -25,9 +25,7 @@ func NewService(internalDB *gorm.DB) *Service {
 
 func (s *Service) RegisterTargetDB(ctx context.Context, info models.TargetDBInfo) (int, error) {
 	s.internalDB.Create(&info)
-	var storedID int
-	s.internalDB.Model(&models.TargetDBInfo{}).Where("DBName = ?", info.DBName).Select("id").Scan(&storedID)
-	return storedID, nil
+	return info.ID, nil
 }
 
 func (s *Service) GetTargetConnection(ctx context.Context, targetDBID int) (*sql.DB, error) {

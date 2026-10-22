@@ -3,6 +3,7 @@ package models
 import "time"
 
 type TargetDBInfo struct {
+	ID       int `gorm:"primaryKey"`
 	Name     string
 	DBType   string
 	Host     string
