@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head><title>Migrations</title></head>
+<body>
+	<h1>Migration History (DB #{{.DBID}})</h1>
+	<a href="/databases/{{.DBID}}/schemas">Back to Schemas</a>
+
+	<h2>Create Draft</h2>
+	<form method="POST" action="/databases/{{.DBID}}/migrations">
+		<textarea name="sql_query" placeholder="SQL Query"></textarea>
+		<button type="submit">Create Draft</button>
+	</form>
+
+	<h2>History</h2>
+	<ul>
+	{{range .Migrations}}
+		<li>
+			<a href="/databases/{{$.DBID}}/migrations/{{.ID}}">Migration #{{.ID}}</a>
+			| Version: {{.Version}} | Status: {{.Status}} | Query: {{.SQLQuery}}
+		</li>
+	{{end}}
+	</ul>
+</body>
+</html>

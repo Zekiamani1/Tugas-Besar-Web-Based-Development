@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head><title>Table Data</title></head>
+<body>
+	<h1>Data: {{.Schema}}.{{.TableName}}</h1>
+	<nav>
+		<a href="/databases/{{.DBID}}/schemas/{{.Schema}}/tables/{{.TableName}}">Table Details</a> |
+		<a href="/databases/{{.DBID}}/schemas/{{.Schema}}/tables">Back to Tables</a>
+	</nav>
+	<table border="1">
+	{{range .Rows}}
+		<tr>
+		{{range $k, $v := .}}
+			<td>{{$k}}: {{$v}}</td>
+		{{end}}
+		</tr>
+	{{end}}
+	</table>
+</body>
+</html>

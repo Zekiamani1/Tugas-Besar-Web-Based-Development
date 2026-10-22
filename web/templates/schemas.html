@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head><title>Schemas</title></head>
+<body>
+	<h1>Schemas (DB #{{.DBID}})</h1>
+	<nav>
+		<a href="/dashboard">Dashboard</a> |
+		<a href="/databases/{{.DBID}}/migrations">Migrations</a>
+	</nav>
+	<ul>
+	{{range .Schemas}}
+		<li><a href="/databases/{{$.DBID}}/schemas/{{.}}/tables">{{.}}</a></li>
+	{{end}}
+	</ul>
+</body>
+</html>
