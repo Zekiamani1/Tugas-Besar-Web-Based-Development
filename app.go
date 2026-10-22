@@ -1,10 +1,14 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"html/template"
 	"net/http"
+	"strconv"
 
 	"wbd/internal/middleware"
+	"wbd/internal/models"
 	"wbd/internal/service/interfaces"
 )
 
@@ -63,66 +67,389 @@ func (app *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpl.Execute(w, "")
 }
+
 func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
-	//handle login using access control's login
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	sessionID, err := app.Login(r.Context(), req.Username, req.Password)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_id",
+		Value:    sessionID,
+		Path:     "/",
+		HttpOnly: true,
+	})
+	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
 
 func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
-	//handle logout using access control's logout
+	var sessionID string
+	if c, err := r.Cookie("session_id"); err == nil && c.Value != "" {
+		sessionID = c.Value
+	} else {
+		var req struct {
+			SessionID string `json:"session_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		sessionID = req.SessionID
+	}
+	if err := app.Logout(r.Context(), sessionID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:   "session_id",
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	})
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 func (app *App) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
-	//handle regis using access control's register
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := app.Register(r.Context(), req.Username, req.Password); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/admin.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, fmt.Sprintf("berhasil menambahkan %s", req.Username))
 }
 
 func (app *App) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
-	//handle group creating using access control's create group
+	var req struct {
+		GroupName string `json:"group_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := app.CreateGroup(r.Context(), req.GroupName); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/admin.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, fmt.Sprintf("berhasil menambahkan group %s", req.GroupName))
 }
 
 func (app *App) handleAssignUserToGroup(w http.ResponseWriter, r *http.Request) {
-	//handle group assigning using access control's assign group
+	var req struct {
+		UserID  int `json:"user_id"`
+		GroupID int `json:"group_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := app.AssignUserToGroup(r.Context(), req.UserID, req.GroupID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/admin.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, fmt.Sprintf("berhasil memasukkan user_id %d ke group_id %d", req.UserID, req.GroupID))
 }
 
 func (app *App) handleSetGroupDBAccess(w http.ResponseWriter, r *http.Request) {
-	//handle group access right using access control thingy
+	var req struct {
+		GroupID     int    `json:"group_id"`
+		TargetDBID  int    `json:"target_db_id"`
+		AccessLevel string `json:"access_level"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := app.SetGroupDBAccess(r.Context(), req.GroupID, req.TargetDBID, req.AccessLevel); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/admin.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, fmt.Sprintf("berhasil meng-set hak akses group_id %d pada target_db_id %d menjadi %s", req.GroupID, req.TargetDBID, req.AccessLevel))
 }
 
 func (app *App) handleRegisterTargetDB(w http.ResponseWriter, r *http.Request) {
-	//handle registering new DB using dbmanagement's registertarget
+	var info models.TargetDBInfo
+	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	dbID, err := app.RegisterTargetDB(r.Context(), info)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/admin.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, fmt.Sprintf("DB ditambahkan dengan id %d", dbID))
 }
 
 func (app *App) handleGetSchemas(w http.ResponseWriter, r *http.Request) {
-	//handle getting schemas using dbmanagement's getschemas
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	schemas, err := app.GetSchemas(r.Context(), dbID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/schemas.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, struct {
+		DBID    int
+		Schemas []string
+	}{
+		DBID:    dbID,
+		Schemas: schemas,
+	})
 }
 
 func (app *App) handleGetTables(w http.ResponseWriter, r *http.Request) {
-	//handle getting tables using dbmanagement's gettables
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	schema := r.PathValue("schema")
+	tables, err := app.GetTables(r.Context(), dbID, schema)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/tables.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, struct {
+		DBID   int
+		Schema string
+		Tables []string
+	}{
+		DBID:   dbID,
+		Schema: schema,
+		Tables: tables,
+	})
 }
 
 func (app *App) handleGetTableDetails(w http.ResponseWriter, r *http.Request) {
-	//handle getting table details using dbmanagement's gettabledetails
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	schema := r.PathValue("schema")
+	table := r.PathValue("table")
+	details, err := app.GetTableDetails(r.Context(), dbID, schema, table)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/table_details.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, struct {
+		DBID     int
+		Metadata *models.TableMetadata
+	}{
+		DBID:     dbID,
+		Metadata: details,
+	})
 }
 
 func (app *App) handleGetTableData(w http.ResponseWriter, r *http.Request) {
-	//handle getting table data using dbmanagement's gettabledata
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	schema := r.PathValue("schema")
+	table := r.PathValue("table")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 10
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	data, err := app.GetTableData(r.Context(), dbID, schema, table, limit, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/table_data.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, struct {
+		DBID      int
+		Schema    string
+		TableName string
+		Rows      []map[string]any
+	}{
+		DBID:      dbID,
+		Schema:    schema,
+		TableName: table,
+		Rows:      data,
+	})
 }
 
 func (app *App) handleGetMigrationHistory(w http.ResponseWriter, r *http.Request) {
-	//handle getting migration history using migration's getlinearhistory
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	history, err := app.GetLinearHistory(r.Context(), dbID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/migrations.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, struct {
+		DBID       int
+		Migrations []models.MigrationRecord
+	}{
+		DBID:       dbID,
+		Migrations: history,
+	})
 }
 
 func (app *App) handleGetMigrationDetail(w http.ResponseWriter, r *http.Request) {
-	//handle getting migration detail using migration's getmigrationdetail
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	migrationID, err := strconv.Atoi(r.PathValue("migrationID"))
+	if err != nil {
+		http.Error(w, "invalid migrationID", http.StatusBadRequest)
+		return
+	}
+	detail, err := app.GetMigrationDetail(r.Context(), dbID, migrationID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/migration_detail.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, detail)
 }
 
 func (app *App) handleCreateMigrationDraft(w http.ResponseWriter, r *http.Request) {
-	//handle creating migration draft using migration's createdraft
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		SQLQuery string `json:"sql_query"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	migrationID, err := app.CreateDraft(r.Context(), dbID, req.SQLQuery)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/databases/%d/migrations/%d", dbID, migrationID), http.StatusSeeOther)
 }
 
 func (app *App) handleUpdateMigrationDraft(w http.ResponseWriter, r *http.Request) {
-	//handle updating migration draft using migration's updatedraft
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	migrationID, err := strconv.Atoi(r.PathValue("migrationID"))
+	if err != nil {
+		http.Error(w, "invalid migrationID", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		SQLQuery string `json:"sql_query"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if err := app.UpdateDraft(r.Context(), dbID, migrationID, req.SQLQuery); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/databases/%d/migrations/%d", dbID, migrationID), http.StatusSeeOther)
 }
 
 func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {
-	//handle executing migration using migration's executemigration
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	migrationID, err := strconv.Atoi(r.PathValue("migrationID"))
+	if err != nil {
+		http.Error(w, "invalid migrationID", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if _, err := app.ExecuteMigration(r.Context(), dbID, migrationID, req.Token); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/databases/%d/migrations/%d", dbID, migrationID), http.StatusSeeOther)
 }
