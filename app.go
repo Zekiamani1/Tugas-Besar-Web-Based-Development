@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"mime"
 	"net/http"
 	"strconv"
-
 	"wbd/internal/middleware"
 	"wbd/internal/models"
 	"wbd/internal/service/interfaces"
@@ -48,6 +48,7 @@ func NewApp(
 	app.Handle("GET /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationDetail))
 	app.Handle("POST /databases/{dbID}/migrations", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleCreateMigrationDraft))
 	app.Handle("PUT /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft))
+	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/edit", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/execute", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleExecuteMigration))
 
 	return app
@@ -389,14 +390,12 @@ func (app *App) handleCreateMigrationDraft(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid dbID", http.StatusBadRequest)
 		return
 	}
-	var req struct {
-		SQLQuery string `json:"sql_query"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	sqlQuery, err := migrationSQLFromRequest(r)
+	if err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	migrationID, err := app.CreateDraft(r.Context(), dbID, req.SQLQuery)
+	migrationID, err := app.CreateDraft(r.Context(), dbID, sqlQuery)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -415,18 +414,40 @@ func (app *App) handleUpdateMigrationDraft(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid migrationID", http.StatusBadRequest)
 		return
 	}
-	var req struct {
-		SQLQuery string `json:"sql_query"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	sqlQuery, err := migrationSQLFromRequest(r)
+	if err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if err := app.UpdateDraft(r.Context(), dbID, migrationID, req.SQLQuery); err != nil {
+	if err := app.UpdateDraft(r.Context(), dbID, migrationID, sqlQuery); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	http.Redirect(w, r, fmt.Sprintf("/databases/%d/migrations/%d", dbID, migrationID), http.StatusSeeOther)
+}
+
+func migrationSQLFromRequest(r *http.Request) (string, error) {
+	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil {
+		return "", err
+	}
+	switch contentType {
+	case "application/json":
+		var req struct {
+			SQLQuery string `json:"sql_query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return "", err
+		}
+		return req.SQLQuery, nil
+	case "application/x-www-form-urlencoded":
+		if err := r.ParseForm(); err != nil {
+			return "", err
+		}
+		return r.PostForm.Get("sql_query"), nil
+	default:
+		return "", fmt.Errorf("unsupported content type: %s", contentType)
+	}
 }
 
 func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {

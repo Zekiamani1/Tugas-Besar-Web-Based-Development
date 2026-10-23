@@ -16,7 +16,7 @@
 	{{range .Migrations}}
 		<li>
 			<a href="/databases/{{$.DBID}}/migrations/{{.ID}}">Migration #{{.ID}}</a>
-			| Version: {{.Version}} | Status: {{.Status}} | Query: {{.SQLQuery}}
+			| Version: {{.Version}} | Status: {{.Status}} | Executed by: {{.ExecutedBy}} | Executed at: {{.ExecutedAt}} | Query: {{.SQLQuery}}
 		</li>
 	{{end}}
 	</ul>
