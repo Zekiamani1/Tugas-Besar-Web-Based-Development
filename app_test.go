@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -494,6 +495,23 @@ func TestMigrationHandlers(t *testing.T) {
 		}
 	})
 
+	t.Run("CreateMigrationDraftFromForm", func(t *testing.T) {
+		mockMig.createDraftFunc = func(ctx context.Context, targetDBID int, sqlQuery string) (int, error) {
+			if targetDBID != 1 || sqlQuery != "CREATE TABLE form_example (id INT);" {
+				t.Errorf("unexpected create draft args: (%d, %s)", targetDBID, sqlQuery)
+			}
+			return 4, nil
+		}
+		body := url.Values{"sql_query": {"CREATE TABLE form_example (id INT);"}}.Encode()
+		req := httptest.NewRequest(http.MethodPost, "/databases/1/migrations", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/databases/1/migrations/4" {
+			t.Errorf("form draft create: code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
+		}
+	})
+
 	t.Run("UpdateMigrationDraft", func(t *testing.T) {
 		mockMig.updateDraftFunc = func(ctx context.Context, targetDBID, migrationID int, sqlQuery string) error {
 			if targetDBID != 1 || migrationID != 3 || sqlQuery != "CREATE TABLE orders (id SERIAL PRIMARY KEY);" {
@@ -512,6 +530,23 @@ func TestMigrationHandlers(t *testing.T) {
 
 		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/databases/1/migrations/3" {
 			t.Errorf("expected 303 redirect to /databases/1/migrations/3, got code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
+		}
+	})
+
+	t.Run("UpdateMigrationDraftFromForm", func(t *testing.T) {
+		mockMig.updateDraftFunc = func(ctx context.Context, targetDBID, migrationID int, sqlQuery string) error {
+			if targetDBID != 1 || migrationID != 4 || sqlQuery != "ALTER TABLE form_example ADD name text;" {
+				t.Errorf("unexpected update draft args: (%d, %d, %s)", targetDBID, migrationID, sqlQuery)
+			}
+			return nil
+		}
+		body := url.Values{"sql_query": {"ALTER TABLE form_example ADD name text;"}}.Encode()
+		req := httptest.NewRequest(http.MethodPost, "/databases/1/migrations/4/edit", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/databases/1/migrations/4" {
+			t.Errorf("form draft update: code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
 		}
 	})
 

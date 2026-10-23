@@ -8,12 +8,21 @@
 	<p>Version: {{.Version}}</p>
 	<p>Status: {{.Status}}</p>
 	<p>ExecutedBy: {{.ExecutedBy}}</p>
+	{{if ne .Status "DRAFT"}}<p>ExecutedAt: {{.ExecutedAt}}</p>{{end}}
 	<pre>{{.SQLQuery}}</pre>
+
+	{{if eq .Status "DRAFT"}}
+	<h2>Edit Draft</h2>
+	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/edit">
+		<textarea name="sql_query" required>{{.SQLQuery}}</textarea>
+		<button type="submit">Save Draft</button>
+	</form>
 
 	<h2>Execute Migration</h2>
 	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/execute">
 		<input type="text" name="token" placeholder="Execution Token">
 		<button type="submit">Execute</button>
 	</form>
+	{{end}}
 </body>
 </html>
