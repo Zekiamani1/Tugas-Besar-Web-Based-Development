@@ -138,7 +138,7 @@ func TestAccessControlHandlers(t *testing.T) {
 	t.Run("LoginPage", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/login", nil)
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleLoginPage(rec, req)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected status 200, got %d", rec.Code)
@@ -161,7 +161,7 @@ func TestAccessControlHandlers(t *testing.T) {
 			"password": "secret",
 		})
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleLogin(rec, req)
 
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("expected status 303 redirect, got %d", rec.Code)
@@ -186,7 +186,7 @@ func TestAccessControlHandlers(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/logout", nil)
 		req.AddCookie(&http.Cookie{Name: "session_id", Value: "sess-123"})
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleLogout(rec, req)
 
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("expected status 303 redirect, got %d", rec.Code)
@@ -209,7 +209,7 @@ func TestAccessControlHandlers(t *testing.T) {
 			"password": "pass123",
 		})
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleRegisterUser(rec, req)
 
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "berhasil menambahkan alice") {
 			t.Errorf("expected 200 OK with success message on admin page, got code=%d body=%s", rec.Code, rec.Body.String())
@@ -228,7 +228,7 @@ func TestAccessControlHandlers(t *testing.T) {
 			"group_name": "analysts",
 		})
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleCreateGroup(rec, req)
 
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "berhasil menambahkan group analysts") {
 			t.Errorf("expected 200 OK with success message on admin page, got code=%d body=%s", rec.Code, rec.Body.String())
@@ -248,7 +248,7 @@ func TestAccessControlHandlers(t *testing.T) {
 			"group_id": 3,
 		})
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleAssignUserToGroup(rec, req)
 
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "berhasil memasukkan user_id 2 ke group_id 3") {
 			t.Errorf("expected 200 OK with success message on admin page, got code=%d body=%s", rec.Code, rec.Body.String())
@@ -269,7 +269,7 @@ func TestAccessControlHandlers(t *testing.T) {
 			"access_level": "VIEW_EDIT",
 		})
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleSetGroupDBAccess(rec, req)
 
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "berhasil meng-set hak akses group_id 3 pada target_db_id 1 menjadi VIEW_EDIT") {
 			t.Errorf("expected 200 OK with success message on admin page, got code=%d body=%s", rec.Code, rec.Body.String())
@@ -299,7 +299,7 @@ func TestDBManagementHandlers(t *testing.T) {
 			DBName:   "prod_db",
 		})
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleRegisterTargetDB(rec, req)
 
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "DB ditambahkan dengan id 1") {
 			t.Errorf("expected 200 OK with success message on admin page, got code=%d body=%s", rec.Code, rec.Body.String())
@@ -315,8 +315,9 @@ func TestDBManagementHandlers(t *testing.T) {
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/databases/1/schemas", nil)
+		req.SetPathValue("dbID", "1")
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleGetSchemas(rec, req)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -336,8 +337,10 @@ func TestDBManagementHandlers(t *testing.T) {
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/databases/1/schemas/public/tables", nil)
+		req.SetPathValue("dbID", "1")
+		req.SetPathValue("schema", "public")
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleGetTables(rec, req)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -370,8 +373,11 @@ func TestDBManagementHandlers(t *testing.T) {
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/databases/1/schemas/public/tables/users", nil)
+		req.SetPathValue("dbID", "1")
+		req.SetPathValue("schema", "public")
+		req.SetPathValue("table", "users")
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleGetTableDetails(rec, req)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -393,8 +399,11 @@ func TestDBManagementHandlers(t *testing.T) {
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/databases/1/schemas/public/tables/users/data?limit=10&offset=0", nil)
+		req.SetPathValue("dbID", "1")
+		req.SetPathValue("schema", "public")
+		req.SetPathValue("table", "users")
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleGetTableData(rec, req)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -422,8 +431,9 @@ func TestMigrationHandlers(t *testing.T) {
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/databases/1/migrations", nil)
+		req.SetPathValue("dbID", "1")
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleGetMigrationHistory(rec, req)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -450,8 +460,10 @@ func TestMigrationHandlers(t *testing.T) {
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/databases/1/migrations/2", nil)
+		req.SetPathValue("dbID", "1")
+		req.SetPathValue("migrationID", "2")
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleGetMigrationDetail(rec, req)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -473,8 +485,9 @@ func TestMigrationHandlers(t *testing.T) {
 		req := newJSONRequest(t, http.MethodPost, "/databases/1/migrations", map[string]any{
 			"sql_query": "CREATE TABLE orders (id INT);",
 		})
+		req.SetPathValue("dbID", "1")
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleCreateMigrationDraft(rec, req)
 
 		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/databases/1/migrations/3" {
 			t.Errorf("expected 303 redirect to /databases/1/migrations/3, got code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
@@ -492,8 +505,10 @@ func TestMigrationHandlers(t *testing.T) {
 		req := newJSONRequest(t, http.MethodPut, "/databases/1/migrations/3", map[string]any{
 			"sql_query": "CREATE TABLE orders (id SERIAL PRIMARY KEY);",
 		})
+		req.SetPathValue("dbID", "1")
+		req.SetPathValue("migrationID", "3")
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleUpdateMigrationDraft(rec, req)
 
 		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/databases/1/migrations/3" {
 			t.Errorf("expected 303 redirect to /databases/1/migrations/3, got code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
@@ -518,8 +533,10 @@ func TestMigrationHandlers(t *testing.T) {
 		req := newJSONRequest(t, http.MethodPost, "/databases/1/migrations/3/execute", map[string]any{
 			"token": "exec-token-xyz",
 		})
+		req.SetPathValue("dbID", "1")
+		req.SetPathValue("migrationID", "3")
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleExecuteMigration(rec, req)
 
 		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/databases/1/migrations/3" {
 			t.Errorf("expected 303 redirect to /databases/1/migrations/3, got code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
