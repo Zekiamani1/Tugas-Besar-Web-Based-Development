@@ -505,8 +505,9 @@ func TestMigrationHandlers(t *testing.T) {
 		body := url.Values{"sql_query": {"CREATE TABLE form_example (id INT);"}}.Encode()
 		req := httptest.NewRequest(http.MethodPost, "/databases/1/migrations", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.SetPathValue("dbID", "1")
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleCreateMigrationDraft(rec, req)
 		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/databases/1/migrations/4" {
 			t.Errorf("form draft create: code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
 		}
@@ -543,8 +544,10 @@ func TestMigrationHandlers(t *testing.T) {
 		body := url.Values{"sql_query": {"ALTER TABLE form_example ADD name text;"}}.Encode()
 		req := httptest.NewRequest(http.MethodPost, "/databases/1/migrations/4/edit", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.SetPathValue("dbID", "1")
+		req.SetPathValue("migrationID", "4")
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		app.handleUpdateMigrationDraft(rec, req)
 		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/databases/1/migrations/4" {
 			t.Errorf("form draft update: code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
 		}
