@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
 	"wbd/internal/models"
+
+	_ "github.com/lib/pq"
 
 	"gorm.io/gorm"
 )
