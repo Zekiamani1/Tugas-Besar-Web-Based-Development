@@ -11,10 +11,12 @@ type AccessControlService interface {
 	Register(ctx context.Context, username, password string) error
 	Login(ctx context.Context, username, password string) (string, error)
 	Logout(ctx context.Context, sessionID string) error
-	ValidateSession(ctx context.Context, sessionID string) error
+	ValidateSession(ctx context.Context, sessionID string) (int, error)
 	CreateGroup(ctx context.Context, groupName string) error
 	AssignUserToGroup(ctx context.Context, userID, groupID int) error
 	SetGroupDBAccess(ctx context.Context, groupID, targetDBID int, accessLevel string) error
+	EvaluateDBAccess(ctx context.Context, userID, targetDBID int, requiredLevel string) error
+	IsAdmin(ctx context.Context, userID int) (bool, error)
 }
 
 type DBManagementService interface {
