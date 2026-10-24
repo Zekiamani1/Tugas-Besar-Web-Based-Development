@@ -48,10 +48,17 @@ type MigrationRecord struct {
 }
 
 type User struct {
-	ID               int    `gorm:"primaryKey"`
-	Username         string `gorm:"uniqueIndex;not null"`
-	PasswordHash     string `gorm:"not null"`
-	IsAdmin  bool  `gorm:"not null;default:false"`
+	ID           int    `gorm:"primaryKey"`
+	Username     string `gorm:"uniqueIndex;not null"`
+	PasswordHash string `gorm:"not null"`
+	IsAdmin      bool   `gorm:"not null;default:false"`
+}
+
+// UserSummary contains the user fields that are safe to display in admin pages.
+type UserSummary struct {
+	ID       int
+	Username string
+	IsAdmin  bool
 }
 
 type Session struct {
@@ -64,17 +71,23 @@ type Session struct {
 }
 
 type Group struct {
-    ID   int    `gorm:"primaryKey"`
-    Name string `gorm:"uniqueIndex;not null"`
+	ID   int    `gorm:"primaryKey"`
+	Name string `gorm:"uniqueIndex;not null"`
+}
+
+// GroupSummary contains the group fields needed by admin pages.
+type GroupSummary struct {
+	ID   int
+	Name string
 }
 
 type UserGroup struct {
-    UserID  int `gorm:"primaryKey;autoIncrement:false"`
-    GroupID int `gorm:"primaryKey;autoIncrement:false"`
+	UserID  int `gorm:"primaryKey;autoIncrement:false"`
+	GroupID int `gorm:"primaryKey;autoIncrement:false"`
 }
 
 type GroupDBAccess struct {
-    GroupID     int    `gorm:"primaryKey;autoIncrement:false"`
-    TargetDBID  int    `gorm:"primaryKey;autoIncrement:false"`
-    AccessLevel string `gorm:"not null"`
+	GroupID     int    `gorm:"primaryKey;autoIncrement:false"`
+	TargetDBID  int    `gorm:"primaryKey;autoIncrement:false"`
+	AccessLevel string `gorm:"not null"`
 }

@@ -24,6 +24,8 @@ type mockAccessControlService struct {
 	loginFunc             func(ctx context.Context, username, password string) (string, error)
 	logoutFunc            func(ctx context.Context, sessionID string) error
 	validateSessionFunc   func(ctx context.Context, sessionID string) (int, error)
+	listUsersFunc         func(ctx context.Context) ([]models.UserSummary, error)
+	listGroupsFunc        func(ctx context.Context) ([]models.GroupSummary, error)
 	isAdminFunc           func(ctx context.Context, userID int) (bool, error)
 	evaluateDBAccessFunc  func(ctx context.Context, userID, targetDBID int, requiredLevel string) error
 	createGroupFunc       func(ctx context.Context, groupName string) error
@@ -48,6 +50,20 @@ func (m *mockAccessControlService) ValidateSession(ctx context.Context, sessionI
 		return m.validateSessionFunc(ctx, sessionID)
 	}
 	return 0, nil
+}
+
+func (m *mockAccessControlService) ListUsers(ctx context.Context) ([]models.UserSummary, error) {
+	if m.listUsersFunc == nil {
+		return nil, nil
+	}
+	return m.listUsersFunc(ctx)
+}
+
+func (m *mockAccessControlService) ListGroups(ctx context.Context) ([]models.GroupSummary, error) {
+	if m.listGroupsFunc == nil {
+		return nil, nil
+	}
+	return m.listGroupsFunc(ctx)
 }
 
 func (m *mockAccessControlService) IsAdmin(ctx context.Context, userID int) (bool, error) {
@@ -160,7 +176,7 @@ func newJSONRequest(t *testing.T, method, target string, payload any) *http.Requ
 
 func TestAccessControlHandlers(t *testing.T) {
 	mockAC := &mockAccessControlService{}
-	app := NewApp(mockAC, nil, nil)
+	app := NewApp(mockAC, &mockDBManagementService{}, nil)
 
 	t.Run("LoginPage", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/login", nil)
@@ -618,8 +634,18 @@ func TestDBManagementHandlers(t *testing.T) {
 
 func TestAdminBrowserForms(t *testing.T) {
 	mockAC := &mockAccessControlService{}
-	mockDBM := &mockDBManagementService{}
+	mockDBM := &mockDBManagementService{
+		listDatabasesFunc: func(context.Context) ([]models.TargetDBInfo, error) {
+			return []models.TargetDBInfo{{ID: 1, Name: "production", DBType: "postgres", Host: "localhost", Port: 5432, DBName: "prod_db"}}, nil
+		},
+	}
 	app := NewApp(mockAC, mockDBM, nil)
+	mockAC.listUsersFunc = func(context.Context) ([]models.UserSummary, error) {
+		return []models.UserSummary{{ID: 2, Username: "alice"}}, nil
+	}
+	mockAC.listGroupsFunc = func(context.Context) ([]models.GroupSummary, error) {
+		return []models.GroupSummary{{ID: 3, Name: "analysts"}}, nil
+	}
 
 	mockAC.registerFunc = func(_ context.Context, username, password string) error {
 		if username != "alice" || password != "pass123" {
@@ -687,8 +713,8 @@ func TestAdminBrowserForms(t *testing.T) {
 			t.Errorf("expected 400 for invalid numeric field, got %d", rec.Code)
 		}
 		body := rec.Body.String()
-		if !strings.Contains(body, `role="alert"`) || !strings.Contains(body, `value="3"`) || !strings.Contains(body, "ID pengguna dan grup") {
-			t.Errorf("expected inline error and preserved group ID, got %s", body)
+		if !strings.Contains(body, `role="alert"`) || !strings.Contains(body, `value="3" selected`) || !strings.Contains(body, "Pilih user dan group") {
+			t.Errorf("expected inline error and preserved group choice, got %s", body)
 		}
 	})
 
@@ -728,6 +754,92 @@ func TestMigrationFormErrorKeepsSQL(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), sql) || !strings.Contains(rec.Body.String(), `role="alert"`) {
 		t.Fatalf("migration form feedback: status=%d body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestAdminEntityListPages(t *testing.T) {
+	mockAC := &mockAccessControlService{
+		validateSessionFunc: func(context.Context, string) (int, error) { return 7, nil },
+		isAdminFunc:         func(context.Context, int) (bool, error) { return true, nil },
+		listUsersFunc: func(context.Context) ([]models.UserSummary, error) {
+			return []models.UserSummary{{ID: 4, Username: "alice", IsAdmin: false}}, nil
+		},
+		listGroupsFunc: func(context.Context) ([]models.GroupSummary, error) {
+			return []models.GroupSummary{{ID: 2, Name: "analysts"}}, nil
+		},
+	}
+	mockDBM := &mockDBManagementService{
+		listDatabasesFunc: func(context.Context) ([]models.TargetDBInfo, error) {
+			return []models.TargetDBInfo{{
+				ID: 9, Name: "analytics", DBType: "postgres", Host: "db.internal", Port: 5432,
+				User: "db-admin", Password: "do-not-display-this", DBName: "analytics_db",
+			}}, nil
+		},
+	}
+	app := NewApp(mockAC, mockDBM, nil)
+
+	tests := []struct {
+		path        string
+		wantText    []string
+		mustNotHave []string
+	}{
+		{path: "/admin/users", wantText: []string{"alice", "<td>4</td>", "Platform role"}, mustNotHave: []string{"do-not-display-this", "password_hash"}},
+		{path: "/admin/groups", wantText: []string{"analysts", "<td>2</td>", "Group list"}, mustNotHave: []string{"do-not-display-this"}},
+		{path: "/admin/databases", wantText: []string{"analytics", "<td>9</td>", "db.internal", "analytics_db"}, mustNotHave: []string{"do-not-display-this", "db-admin"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "admin-session"})
+			rec := httptest.NewRecorder()
+			app.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+			for _, text := range tt.wantText {
+				if !strings.Contains(rec.Body.String(), text) {
+					t.Errorf("expected %q in page, got: %s", text, rec.Body.String())
+				}
+			}
+			for _, text := range tt.mustNotHave {
+				if strings.Contains(rec.Body.String(), text) {
+					t.Errorf("page must not include %q", text)
+				}
+			}
+		})
+	}
+
+	t.Run("admin page links to each list", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "admin-session"})
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		for _, href := range []string{`href="/admin/users"`, `href="/admin/groups"`, `href="/admin/databases"`} {
+			if !strings.Contains(rec.Body.String(), href) {
+				t.Errorf("expected admin link %s", href)
+			}
+		}
+		for _, option := range []string{`value="4"`, `alice (User #4)`, `analysts (Group #2)`, `analytics (Database #9)`} {
+			if !strings.Contains(rec.Body.String(), option) {
+				t.Errorf("expected named assignment option %q", option)
+			}
+		}
+	})
+
+	t.Run("non-admin cannot open lists", func(t *testing.T) {
+		mockAC.isAdminFunc = func(context.Context, int) (bool, error) { return false, nil }
+		for _, path := range []string{"/admin/users", "/admin/groups", "/admin/databases"} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "admin-session"})
+			rec := httptest.NewRecorder()
+			app.ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("expected 403 for %s, got %d: %s", path, rec.Code, rec.Body.String())
+			}
+		}
+	})
 }
 
 func TestMigrationHandlers(t *testing.T) {

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Databases · Admin</title>
+	<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+	<main class="page">
+		<header class="page-header">
+			<div><p class="eyebrow">Admin Panel</p><h1>Databases</h1></div>
+			<nav><a href="/admin">Admin Panel</a><a href="/admin/users">Users</a><a href="/admin/groups">Groups</a></nav>
+		</header>
+		<section class="card">
+			<h2>Database list</h2>
+			{{if .Databases}}
+			<div class="table-wrap"><table>
+				<thead><tr><th scope="col">ID</th><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Host</th><th scope="col">Port</th><th scope="col">Database name</th></tr></thead>
+				<tbody>{{range .Databases}}<tr><td>{{.ID}}</td><td>{{.Name}}</td><td>{{.DBType}}</td><td>{{.Host}}</td><td>{{.Port}}</td><td>{{.DBName}}</td></tr>{{end}}</tbody>
+			</table></div>
+			{{else}}<p class="empty-state">Belum ada database terdaftar.</p>{{end}}
+		</section>
+	</main>
+</body>
+</html>
