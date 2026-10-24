@@ -14,7 +14,8 @@
 	<ul>
 	{{range .Databases}}
 		<li>
-			<a href="/databases/{{.ID}}/schemas">{{.Name}}</a> ({{.DBType}} - {{.Host}}:{{.Port}}/{{.DBName}})
+			<strong><a href="/databases/{{.ID}}/schemas">{{.Name}}</a></strong> ({{.DBType}} - {{.Host}}:{{.Port}}/{{.DBName}})
+			| <a href="/databases/{{.ID}}/migrations">Migrations</a>
 		</li>
 	{{end}}
 	</ul>

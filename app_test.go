@@ -347,11 +347,11 @@ func TestDBManagementHandlers(t *testing.T) {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 		body := rec.Body.String()
-		if !strings.Contains(body, "production_pg") || !strings.Contains(body, "/databases/1/schemas") {
-			t.Errorf("expected production_pg and link /databases/1/schemas, got:\n%s", body)
+		if !strings.Contains(body, "production_pg") || !strings.Contains(body, "/databases/1/schemas") || !strings.Contains(body, "/databases/1/migrations") {
+			t.Errorf("expected production_pg, /databases/1/schemas, and /databases/1/migrations, got:\n%s", body)
 		}
-		if !strings.Contains(body, "analytics_pg") || !strings.Contains(body, "/databases/2/schemas") {
-			t.Errorf("expected analytics_pg and link /databases/2/schemas, got:\n%s", body)
+		if !strings.Contains(body, "analytics_pg") || !strings.Contains(body, "/databases/2/schemas") || !strings.Contains(body, "/databases/2/migrations") {
+			t.Errorf("expected analytics_pg, /databases/2/schemas, and /databases/2/migrations, got:\n%s", body)
 		}
 	})
 

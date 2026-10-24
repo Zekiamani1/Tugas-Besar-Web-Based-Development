@@ -65,11 +65,8 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpl, err := template.ParseFiles("web/templates/dashboard.html")
 	if err != nil {
-		tmpl, err = template.ParseFiles("web/static/dashboard.html")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	tmpl.Execute(w, struct {
 		Databases []models.TargetDBInfo

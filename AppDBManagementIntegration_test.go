@@ -150,8 +150,8 @@ func TestIntegrationDBManagement(t *testing.T) {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 		body := rec.Body.String()
-		if !strings.Contains(body, "integration_target") || !strings.Contains(body, "/databases/"+id+"/schemas") {
-			t.Errorf("expected database name and link in dashboard, got:\n%s", body)
+		if !strings.Contains(body, "integration_target") || !strings.Contains(body, "/databases/"+id+"/schemas") || !strings.Contains(body, "/databases/"+id+"/migrations") {
+			t.Errorf("expected database name, schemas link, and migrations link in dashboard, got:\n%s", body)
 		}
 	})
 
