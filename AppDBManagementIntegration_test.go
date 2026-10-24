@@ -133,6 +133,28 @@ func TestIntegrationDBManagement(t *testing.T) {
 	}
 	id := strconv.Itoa(dbID)
 
+	t.Run("ListDatabasesAndDashboard", func(t *testing.T) {
+		dbs, err := dbmSvc.ListDatabases(ctx)
+		if err != nil {
+			t.Fatalf("expected ListDatabases to succeed, got error: %v", err)
+		}
+		if len(dbs) == 0 {
+			t.Fatalf("expected at least 1 database, got 0")
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+		rec := httptest.NewRecorder()
+		app.handleDashboard(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "integration_target") || !strings.Contains(body, "/databases/"+id+"/schemas") || !strings.Contains(body, "/databases/"+id+"/migrations") {
+			t.Errorf("expected database name, schemas link, and migrations link in dashboard, got:\n%s", body)
+		}
+	})
+
 	t.Run("GetSchemas", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/databases/"+id+"/schemas", nil)
 		req.SetPathValue("dbID", id)

@@ -29,6 +29,18 @@ func (s *Service) RegisterTargetDB(ctx context.Context, info models.TargetDBInfo
 	return info.ID, nil
 }
 
+func (s *Service) ListDatabases(ctx context.Context) ([]models.TargetDBInfo, error) {
+	var dbs []models.TargetDBInfo
+	if err := s.internalDB.WithContext(ctx).Find(&dbs).Error; err != nil {
+		return nil, err
+	}
+	return dbs, nil
+}
+
+func (s *Service) GetDatabases(ctx context.Context) ([]models.TargetDBInfo, error) {
+	return s.ListDatabases(ctx)
+}
+
 func (s *Service) GetTargetConnection(ctx context.Context, targetDBID int) (*sql.DB, error) {
 	var info models.TargetDBInfo
 	s.internalDB.Model(&models.TargetDBInfo{}).Where("id = ?", targetDBID).Scan(&info)

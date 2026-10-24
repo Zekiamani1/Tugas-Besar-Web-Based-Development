@@ -21,6 +21,7 @@ type AccessControlService interface {
 
 type DBManagementService interface {
 	RegisterTargetDB(ctx context.Context, info models.TargetDBInfo) (int, error)
+	ListDatabases(ctx context.Context) ([]models.TargetDBInfo, error)
 	GetTargetConnection(ctx context.Context, targetDBID int) (*sql.DB, error)
 	GetSchemas(ctx context.Context, targetDBID int) ([]string, error)
 	GetTables(ctx context.Context, targetDBID int, schema string) ([]string, error)
