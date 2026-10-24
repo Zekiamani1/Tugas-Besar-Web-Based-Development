@@ -92,6 +92,17 @@ func (s *Service) GetMigrationDetail(ctx context.Context, targetDBID, migrationI
 	return &record, nil
 }
 
+func (s *Service) GetDrafts(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error) {
+	if targetDBID <= 0 {
+		return nil, ErrInvalidMigration
+	}
+	var drafts []models.MigrationRecord
+	err := s.internalDB.WithContext(ctx).
+		Where("target_db_id = ? AND status = ?", targetDBID, StatusDraft).
+		Order("id ASC").Find(&drafts).Error
+	return drafts, err
+}
+
 func (s *Service) GetLinearHistory(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error) {
 	if targetDBID <= 0 {
 		return nil, ErrInvalidMigration

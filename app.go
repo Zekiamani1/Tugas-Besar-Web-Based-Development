@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"mime"
 	"net/http"
+	"net/url"
 	"strconv"
 	"wbd/internal/middleware"
 	"wbd/internal/models"
@@ -60,10 +61,41 @@ func (app *App) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "web/static/login.html")
 }
 func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie(middleware.SessionCookieName)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	userID, err := app.ValidateSession(r.Context(), cookie.Value)
+	if errors.Is(err, accesscontrol.ErrInvalidSession) || (err == nil && userID <= 0) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	isAdmin, err := app.IsAdmin(r.Context(), userID)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 	dbs, err := app.ListDatabases(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	accessibleDBs := make([]models.TargetDBInfo, 0, len(dbs))
+	for _, db := range dbs {
+		err := app.EvaluateDBAccess(r.Context(), userID, db.ID, accesscontrol.AccessLevelViewOnly)
+		if errors.Is(err, accesscontrol.ErrDBAccessDenied) {
+			continue
+		}
+		if err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		accessibleDBs = append(accessibleDBs, db)
 	}
 	tmpl, err := template.ParseFiles("web/templates/dashboard.html")
 	if err != nil {
@@ -72,8 +104,10 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpl.Execute(w, struct {
 		Databases []models.TargetDBInfo
+		IsAdmin   bool
 	}{
-		Databases: dbs,
+		Databases: accessibleDBs,
+		IsAdmin:   isAdmin,
 	})
 }
 
@@ -95,12 +129,27 @@ func (app *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 	tmpl.Execute(w, "")
 }
 
+func decodeJSONOrForm(r *http.Request, dst any, fromForm func(url.Values) error) error {
+	contentType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if contentType != "application/x-www-form-urlencoded" {
+		return json.NewDecoder(r.Body).Decode(dst)
+	}
+	if err := r.ParseForm(); err != nil {
+		return err
+	}
+	return fromForm(r.PostForm)
+}
+
 func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONOrForm(r, &req, func(form url.Values) error {
+		req.Username = form.Get("username")
+		req.Password = form.Get("password")
+		return nil
+	}); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -147,7 +196,11 @@ func (app *App) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONOrForm(r, &req, func(form url.Values) error {
+		req.Username = form.Get("username")
+		req.Password = form.Get("password")
+		return nil
+	}); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -167,7 +220,10 @@ func (app *App) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		GroupName string `json:"group_name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONOrForm(r, &req, func(form url.Values) error {
+		req.GroupName = form.Get("group_name")
+		return nil
+	}); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -188,7 +244,13 @@ func (app *App) handleAssignUserToGroup(w http.ResponseWriter, r *http.Request) 
 		UserID  int `json:"user_id"`
 		GroupID int `json:"group_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONOrForm(r, &req, func(form url.Values) (err error) {
+		if req.UserID, err = strconv.Atoi(form.Get("user_id")); err != nil {
+			return err
+		}
+		req.GroupID, err = strconv.Atoi(form.Get("group_id"))
+		return err
+	}); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -210,7 +272,16 @@ func (app *App) handleSetGroupDBAccess(w http.ResponseWriter, r *http.Request) {
 		TargetDBID  int    `json:"target_db_id"`
 		AccessLevel string `json:"access_level"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONOrForm(r, &req, func(form url.Values) (err error) {
+		if req.GroupID, err = strconv.Atoi(form.Get("group_id")); err != nil {
+			return err
+		}
+		if req.TargetDBID, err = strconv.Atoi(form.Get("target_db_id")); err != nil {
+			return err
+		}
+		req.AccessLevel = form.Get("access_level")
+		return nil
+	}); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -228,7 +299,18 @@ func (app *App) handleSetGroupDBAccess(w http.ResponseWriter, r *http.Request) {
 
 func (app *App) handleRegisterTargetDB(w http.ResponseWriter, r *http.Request) {
 	var info models.TargetDBInfo
-	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
+	if err := decodeJSONOrForm(r, &info, func(form url.Values) (err error) {
+		info.Name = form.Get("name")
+		info.DBType = form.Get("db_type")
+		info.Host = form.Get("host")
+		if info.Port, err = strconv.Atoi(form.Get("port")); err != nil {
+			return err
+		}
+		info.User = form.Get("user")
+		info.Password = form.Get("password")
+		info.DBName = form.Get("db_name")
+		return nil
+	}); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -361,16 +443,52 @@ func (app *App) handleGetTableData(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (app *App) migrationCanEdit(r *http.Request, dbID int) (bool, error) {
+	cookie, err := r.Cookie(middleware.SessionCookieName)
+	if err != nil {
+		return false, accesscontrol.ErrInvalidSession
+	}
+	userID, err := app.ValidateSession(r.Context(), cookie.Value)
+	if err != nil {
+		return false, err
+	}
+	if userID <= 0 {
+		return false, accesscontrol.ErrInvalidSession
+	}
+	err = app.EvaluateDBAccess(r.Context(), userID, dbID, accesscontrol.AccessLevelViewEdit)
+	if errors.Is(err, accesscontrol.ErrDBAccessDenied) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (app *App) handleGetMigrationHistory(w http.ResponseWriter, r *http.Request) {
 	dbID, err := strconv.Atoi(r.PathValue("dbID"))
 	if err != nil {
 		http.Error(w, "invalid dbID", http.StatusBadRequest)
 		return
 	}
+	canEdit, err := app.migrationCanEdit(r, dbID)
+	if err != nil {
+		if errors.Is(err, accesscontrol.ErrInvalidSession) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		} else {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
+		return
+	}
 	history, err := app.GetLinearHistory(r.Context(), dbID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	var drafts []models.MigrationRecord
+	if canEdit {
+		drafts, err = app.GetDrafts(r.Context(), dbID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	tmpl, err := template.ParseFiles("web/templates/migrations.html")
 	if err != nil {
@@ -380,9 +498,13 @@ func (app *App) handleGetMigrationHistory(w http.ResponseWriter, r *http.Request
 	tmpl.Execute(w, struct {
 		DBID       int
 		Migrations []models.MigrationRecord
+		Drafts     []models.MigrationRecord
+		CanEdit    bool
 	}{
 		DBID:       dbID,
 		Migrations: history,
+		Drafts:     drafts,
+		CanEdit:    canEdit,
 	})
 }
 
@@ -397,6 +519,15 @@ func (app *App) handleGetMigrationDetail(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid migrationID", http.StatusBadRequest)
 		return
 	}
+	canEdit, err := app.migrationCanEdit(r, dbID)
+	if err != nil {
+		if errors.Is(err, accesscontrol.ErrInvalidSession) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		} else {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
+		return
+	}
 	detail, err := app.GetMigrationDetail(r.Context(), dbID, migrationID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -407,7 +538,13 @@ func (app *App) handleGetMigrationDetail(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	tmpl.Execute(w, detail)
+	tmpl.Execute(w, struct {
+		*models.MigrationRecord
+		CanEdit bool
+	}{
+		MigrationRecord: detail,
+		CanEdit:         canEdit,
+	})
 }
 
 func (app *App) handleCreateMigrationDraft(w http.ResponseWriter, r *http.Request) {

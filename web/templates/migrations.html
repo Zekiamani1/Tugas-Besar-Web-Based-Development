@@ -6,11 +6,22 @@
 	<a href="/dashboard">Back to Dashboard</a> |
 	<a href="/databases/{{.DBID}}/schemas">Back to Schemas</a>
 
+	{{if .CanEdit}}
 	<h2>Create Draft</h2>
 	<form method="POST" action="/databases/{{.DBID}}/migrations">
-		<textarea name="sql_query" placeholder="SQL Query"></textarea>
+		<textarea name="sql_query" placeholder="SQL Query" required></textarea>
 		<button type="submit">Create Draft</button>
 	</form>
+
+	<h2>Drafts</h2>
+	<ul>
+	{{range .Drafts}}
+		<li><a href="/databases/{{$.DBID}}/migrations/{{.ID}}">Draft #{{.ID}}</a>: {{.SQLQuery}}</li>
+	{{else}}
+		<li>No drafts yet.</li>
+	{{end}}
+	</ul>
+	{{end}}
 
 	<h2>History</h2>
 	<ul>

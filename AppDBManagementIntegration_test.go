@@ -94,9 +94,23 @@ func TestIntegrationDBManagement(t *testing.T) {
 
 	dbmSvc := dbmanagement.NewService(internalDB)
 	defer dbmSvc.CloseAllTargetConnections()
-	app := NewApp(nil, dbmSvc, nil)
-
 	var dbID int
+	mockAC := &mockAccessControlService{
+		validateSessionFunc: func(_ context.Context, sessionID string) (int, error) {
+			if sessionID != "integration-session" {
+				t.Errorf("unexpected session ID: %s", sessionID)
+			}
+			return 7, nil
+		},
+		isAdminFunc: func(context.Context, int) (bool, error) { return false, nil },
+		evaluateDBAccessFunc: func(_ context.Context, userID, targetDBID int, requiredLevel string) error {
+			if userID != 7 || targetDBID != dbID || requiredLevel != "VIEW_ONLY" {
+				t.Errorf("unexpected dashboard access check: user=%d db=%d level=%s", userID, targetDBID, requiredLevel)
+			}
+			return nil
+		},
+	}
+	app := NewApp(mockAC, dbmSvc, nil)
 
 	t.Run("RegisterTargetDB", func(t *testing.T) {
 		req := newJSONRequest(t, http.MethodPost, "/admin/databases", models.TargetDBInfo{
@@ -143,6 +157,7 @@ func TestIntegrationDBManagement(t *testing.T) {
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+		req.AddCookie(&http.Cookie{Name: "session_id", Value: "integration-session"})
 		rec := httptest.NewRecorder()
 		app.handleDashboard(rec, req)
 
