@@ -46,3 +46,35 @@ type MigrationRecord struct {
 	Status     string
 	ExecutedAt time.Time
 }
+
+type User struct {
+	ID               int    `gorm:"primaryKey"`
+	Username         string `gorm:"uniqueIndex;not null"`
+	PasswordHash     string `gorm:"not null"`
+	IsAdmin  bool  `gorm:"not null;default:false"`
+}
+
+type Session struct {
+	ID         int       `gorm:"primaryKey"`
+	UserID     int       `gorm:"not null;index"`
+	SessionID  string    `gorm:"uniqueIndex;not null"`
+	CreatedAt  time.Time `gorm:"not null"`
+	LastSeenAt time.Time `gorm:"not null"`
+	ExpiresAt  time.Time `gorm:"not null"`
+}
+
+type Group struct {
+    ID   int    `gorm:"primaryKey"`
+    Name string `gorm:"uniqueIndex;not null"`
+}
+
+type UserGroup struct {
+    UserID  int `gorm:"primaryKey;autoIncrement:false"`
+    GroupID int `gorm:"primaryKey;autoIncrement:false"`
+}
+
+type GroupDBAccess struct {
+    GroupID     int    `gorm:"primaryKey;autoIncrement:false"`
+    TargetDBID  int    `gorm:"primaryKey;autoIncrement:false"`
+    AccessLevel string `gorm:"not null"`
+}
