@@ -1,27 +1,30 @@
 <!DOCTYPE html>
-<html>
-<head><title>Dashboard</title></head>
+<html lang="id">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Dashboard · Database Manager</title><link rel="stylesheet" href="/static/app.css"></head>
 <body>
-	<h1>Dashboard</h1>
-	<nav>
+	<main class="page">
+	<header class="page-header"><div><p class="eyebrow">Database Manager</p><h1>Dashboard</h1></div><nav>
 		{{if .IsAdmin}}
 		<a href="/admin">Admin Panel</a>
 		{{end}}
 		<form method="POST" action="/logout">
 			<button type="submit">Logout</button>
 		</form>
-	</nav>
+	</nav></header>
 
-	<h2>Databases</h2>
-	<ul>
+	<section class="card"><h2>Databases</h2>
+	<ul class="item-list">
 	{{range .Databases}}
 		<li>
-			<strong><a href="/databases/{{.ID}}/schemas">{{.Name}}</a></strong> ({{.DBType}} - {{.Host}}:{{.Port}}/{{.DBName}})
-			| <a href="/databases/{{.ID}}/migrations">Migrations</a>
+			<strong><a href="/databases/{{.ID}}/schemas">{{.Name}}</a></strong><br>
+			<span class="muted">{{.DBType}} · {{.Host}}:{{.Port}}/{{.DBName}}</span>
+			<div class="link-row"><a href="/databases/{{.ID}}/schemas">Browse data</a><a href="/databases/{{.ID}}/migrations">Migrations</a></div>
 		</li>
 	{{else}}
-		<li>No databases available for your account.</li>
+		<li class="empty-state">Belum ada database yang dapat diakses akun Anda.</li>
 	{{end}}
 	</ul>
+	</section>
+	</main>
 </body>
 </html>

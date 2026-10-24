@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/interfaces"
 )
@@ -14,11 +15,19 @@ type contextKey string
 
 const userIDContextKey contextKey = "authenticated-user-id"
 
-//helper ambil userid
+// helper ambil userid
 func userIDFromContext(ctx context.Context) (int, bool) {
 	userID, ok := ctx.Value(userIDContextKey).(int)
 
 	return userID, ok && userID > 0
+}
+
+func rejectUnauthenticated(w http.ResponseWriter, r *http.Request) {
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		http.Redirect(w, r, "/login?reason=session", http.StatusSeeOther)
+		return
+	}
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 
 func RequireAuth(ac interfaces.AccessControlService, next http.HandlerFunc) http.Handler {
@@ -27,13 +36,13 @@ func RequireAuth(ac interfaces.AccessControlService, next http.HandlerFunc) http
 
 		cookie, err := r.Cookie(SessionCookieName)
 		if err != nil {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			rejectUnauthenticated(w, r)
 			return
 		}
 
 		userID, err := ac.ValidateSession(r.Context(), cookie.Value)
 		if errors.Is(err, accesscontrol.ErrInvalidSession) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			rejectUnauthenticated(w, r)
 			return
 		}
 		if err != nil {
@@ -41,7 +50,7 @@ func RequireAuth(ac interfaces.AccessControlService, next http.HandlerFunc) http
 			return
 		}
 		if userID <= 0 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			rejectUnauthenticated(w, r)
 			return
 		}
 

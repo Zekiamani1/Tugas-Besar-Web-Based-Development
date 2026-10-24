@@ -1,0 +1,130 @@
+:root {
+	font-family: Arial, Helvetica, sans-serif;
+	font-size: 14px;
+	line-height: 1.45;
+	color: #222;
+	background: #eee;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: #0645ad; text-decoration: underline; }
+a:hover { color: #b00000; }
+
+.page {
+	max-width: 940px;
+	min-height: 100vh;
+	margin: 0 auto;
+	padding: 20px 24px 48px;
+	background: #fff;
+	border-left: 1px solid #ccc;
+	border-right: 1px solid #ccc;
+}
+
+.page-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: end;
+	gap: 20px;
+	margin-bottom: 22px;
+	padding-bottom: 12px;
+	border-bottom: 3px double #999;
+}
+
+.page-header nav, .link-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 12px;
+}
+
+.page-header nav form { margin: 0; }
+h1, h2, h3 { font-family: Georgia, "Times New Roman", serif; }
+h1 { font-size: 28px; margin: 0 0 4px; }
+h2 { font-size: 19px; margin: 0 0 12px; }
+p { margin-top: 0; }
+.eyebrow { margin: 0 0 5px; font-size: 13px; font-weight: bold; color: #555; }
+.muted { color: #666; }
+
+.card, .auth-card {
+	padding: 16px;
+	background: #fff;
+	border: 1px solid #bbb;
+}
+
+.card + .card { margin-top: 16px; }
+.card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.card-grid .card { margin: 0; }
+.card-wide { grid-column: 1 / -1; }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; }
+
+label { display: block; margin: 12px 0 4px; font-weight: bold; }
+input, select, textarea {
+	display: block;
+	width: 100%;
+	padding: 5px 6px;
+	font: inherit;
+	color: #222;
+	background: #fff;
+	border: 1px solid #999;
+}
+
+textarea { min-height: 145px; resize: vertical; font-family: Consolas, "Courier New", monospace; }
+input:focus, select:focus, textarea:focus { outline: 1px solid #0645ad; }
+button {
+	padding: 5px 10px;
+	font: inherit;
+	color: #222;
+	background: #e5e5e5;
+	border: 1px solid #888;
+	cursor: pointer;
+}
+
+button:hover { background: #d7d7d7; }
+form > button, form > .form-grid + button { margin-top: 14px; }
+.button-danger { color: #8b0000; border-color: #a55; background: #f4e9e9; }
+.button-danger:hover { background: #ecdada; }
+.button-subtle { background: #eee; }
+
+.message { margin: 12px 0; padding: 8px 10px; border: 1px solid #aaa; }
+.message.error { color: #8b0000; background: #fff3f3; border-color: #c88; }
+.message.success { color: #235723; background: #f2faf2; border-color: #9b9; }
+.empty-state { padding: 10px; color: #666; background: #f7f7f7; border: 1px solid #ddd; }
+.item-list { list-style: none; margin: 0; padding: 0; }
+.item-list li { padding: 10px 0; border-top: 1px solid #ddd; }
+.item-list li:first-child { border-top: 0; padding-top: 0; }
+.item-list li:last-child { padding-bottom: 0; }
+
+.status { display: inline-block; padding: 1px 5px; color: #444; background: #eee; border: 1px solid #bbb; font-size: 12px; }
+.status[data-status="APPLIED"] { color: #245324; background: #edf5ed; border-color: #9b9; }
+.status[data-status="FAILED"] { color: #8b0000; background: #faeeee; border-color: #c88; }
+.status[data-status="DRAFT"] { color: #765500; background: #fff9e8; border-color: #ccba77; }
+.sql-preview {
+	margin: 10px 0 0;
+	padding: 10px;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font: 13px/1.4 Consolas, "Courier New", monospace;
+	background: #f6f6f6;
+	border: 1px solid #ccc;
+}
+
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 7px 8px; text-align: left; vertical-align: top; border: 1px solid #ccc; }
+th { background: #eee; }
+td { overflow-wrap: anywhere; }
+
+.auth-page { min-height: 100vh; padding: 1px 16px; }
+.auth-card { width: min(100%, 400px); margin: 75px auto 0; }
+.auth-card button { min-width: 90px; }
+
+@media (max-width: 680px) {
+	.page { padding: 16px 12px 32px; }
+	.page-header { display: block; }
+	.page-header nav { margin-top: 12px; }
+	.card-grid, .form-grid { grid-template-columns: 1fr; }
+	.card-wide { grid-column: auto; }
+	.auth-card { margin-top: 40px; }
+}

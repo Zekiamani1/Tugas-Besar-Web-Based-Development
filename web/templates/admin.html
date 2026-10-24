@@ -1,51 +1,64 @@
 <!DOCTYPE html>
-<html>
-<head><title>Admin Panel</title></head>
+<html lang="id">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Admin · Database Manager</title>
+	<link rel="stylesheet" href="/static/app.css">
+</head>
 <body>
-	<h1>Admin Panel</h1>
-	<a href="/dashboard">Back to Dashboard</a>
-	{{if .}}
-	<p>{{.}}</p>
-	{{end}}
-
-	<h2>Register User</h2>
-	<form method="POST" action="/admin/users">
-		<input type="text" name="username" placeholder="Username">
-		<input type="password" name="password" placeholder="Password">
-		<button type="submit">Register User</button>
-	</form>
-
-	<h2>Create Group</h2>
-	<form method="POST" action="/admin/groups">
-		<input type="text" name="group_name" placeholder="Group Name">
-		<button type="submit">Create Group</button>
-	</form>
-
-	<h2>Assign User to Group</h2>
-	<form method="POST" action="/admin/groups/members">
-		<input type="number" name="user_id" placeholder="User ID">
-		<input type="number" name="group_id" placeholder="Group ID">
-		<button type="submit">Assign</button>
-	</form>
-
-	<h2>Set Group DB Access</h2>
-	<form method="POST" action="/admin/groups/permissions">
-		<input type="number" name="group_id" placeholder="Group ID">
-		<input type="number" name="target_db_id" placeholder="Target DB ID">
-		<input type="text" name="access_level" placeholder="Access Level">
-		<button type="submit">Set Access</button>
-	</form>
-
-	<h2>Register Target Database</h2>
-	<form method="POST" action="/admin/databases">
-		<input type="text" name="name" placeholder="Name">
-		<input type="text" name="db_type" placeholder="DB Type">
-		<input type="text" name="host" placeholder="Host">
-		<input type="number" name="port" placeholder="Port">
-		<input type="text" name="user" placeholder="User">
-		<input type="password" name="password" placeholder="Password">
-		<input type="text" name="db_name" placeholder="DB Name">
-		<button type="submit">Register Database</button>
-	</form>
+	<main class="page">
+		<header class="page-header"><div><p class="eyebrow">Database Manager</p><h1>Admin Panel</h1></div><nav><a href="/dashboard">Dashboard</a></nav></header>
+		{{if and .Message (not .IsError)}}<p class="message success" role="status">{{.Message}}</p>{{end}}
+		<div class="card-grid">
+			<section class="card"><h2>Register User</h2>
+				<form method="POST" action="/admin/users">
+					<label for="user-name">Username</label><input id="user-name" name="username" value="{{.Values.Get "username"}}" autocomplete="off" required>
+					<label for="user-password">Password</label><input id="user-password" type="password" name="password" autocomplete="new-password" required>
+					{{if eq .ErrorForm "/admin/users"}}<p class="message error" role="alert">{{.Message}}</p>{{end}}
+					<button type="submit">Register User</button>
+				</form>
+			</section>
+			<section class="card"><h2>Create Group</h2>
+				<form method="POST" action="/admin/groups">
+					<label for="group-name">Group Name</label><input id="group-name" name="group_name" value="{{.Values.Get "group_name"}}" required>
+					{{if eq .ErrorForm "/admin/groups"}}<p class="message error" role="alert">{{.Message}}</p>{{end}}
+					<button type="submit">Create Group</button>
+				</form>
+			</section>
+			<section class="card"><h2>Assign User to Group</h2>
+				<form method="POST" action="/admin/groups/members">
+					<label for="member-user">User ID</label><input id="member-user" type="number" name="user_id" value="{{.Values.Get "user_id"}}" min="1" required>
+					<label for="member-group">Group ID</label><input id="member-group" type="number" name="group_id" value="{{.Values.Get "group_id"}}" min="1" required>
+					{{if eq .ErrorForm "/admin/groups/members"}}<p class="message error" role="alert">{{.Message}}</p>{{end}}
+					<button type="submit">Assign</button>
+				</form>
+			</section>
+			<section class="card"><h2>Set Group DB Access</h2>
+				<form method="POST" action="/admin/groups/permissions">
+					<label for="access-group">Group ID</label><input id="access-group" type="number" name="group_id" value="{{.Values.Get "group_id"}}" min="1" required>
+					<label for="access-db">Target DB ID</label><input id="access-db" type="number" name="target_db_id" value="{{.Values.Get "target_db_id"}}" min="1" required>
+					<label for="access-level">Access Level</label><select id="access-level" name="access_level" required><option value="VIEW_ONLY" {{if eq (.Values.Get "access_level") "VIEW_ONLY"}}selected{{end}}>View Only</option><option value="VIEW_EDIT" {{if eq (.Values.Get "access_level") "VIEW_EDIT"}}selected{{end}}>View + Edit</option></select>
+					{{if eq .ErrorForm "/admin/groups/permissions"}}<p class="message error" role="alert">{{.Message}}</p>{{end}}
+					<button type="submit">Set Access</button>
+				</form>
+			</section>
+			<section class="card card-wide"><h2>Register Target Database</h2>
+				<form method="POST" action="/admin/databases">
+					<div class="form-grid">
+						<div><label for="db-name">Name</label><input id="db-name" name="name" value="{{.Values.Get "name"}}" required></div>
+						<div><label for="db-type">DB Type</label><input id="db-type" name="db_type" value="{{.Values.Get "db_type"}}" placeholder="postgres" required></div>
+						<div><label for="db-host">Host</label><input id="db-host" name="host" value="{{.Values.Get "host"}}" required></div>
+						<div><label for="db-port">Port</label><input id="db-port" type="number" name="port" value="{{.Values.Get "port"}}" min="1" max="65535" required></div>
+						<div><label for="db-user">User</label><input id="db-user" name="user" value="{{.Values.Get "user"}}" required></div>
+						<div><label for="db-password">Password</label><input id="db-password" type="password" name="password" autocomplete="new-password" required></div>
+						<div><label for="db-database">DB Name</label><input id="db-database" name="db_name" value="{{.Values.Get "db_name"}}" required></div>
+					</div>
+					{{if eq .ErrorForm "/admin/databases"}}<p class="message error" role="alert">{{.Message}}</p>{{end}}
+					<button type="submit">Register Database</button>
+				</form>
+			</section>
+		</div>
+	</main>
 </body>
 </html>

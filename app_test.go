@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -46,7 +47,7 @@ func (m *mockAccessControlService) ValidateSession(ctx context.Context, sessionI
 	if m.validateSessionFunc != nil {
 		return m.validateSessionFunc(ctx, sessionID)
 	}
-	return 0,nil
+	return 0, nil
 }
 
 func (m *mockAccessControlService) IsAdmin(ctx context.Context, userID int) (bool, error) {
@@ -117,7 +118,7 @@ type mockMigrationService struct {
 	createDraftFunc        func(ctx context.Context, targetDBID int, sqlQuery string) (int, error)
 	updateDraftFunc        func(ctx context.Context, targetDBID, migrationID int, sqlQuery string) error
 	getMigrationDetailFunc func(ctx context.Context, targetDBID, migrationID int) (*models.MigrationRecord, error)
-	getDraftsFunc         func(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error)
+	getDraftsFunc          func(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error)
 	getLinearHistoryFunc   func(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error)
 	executeMigrationFunc   func(ctx context.Context, targetDBID, migrationID int, token string) (*models.MigrationRecord, error)
 }
@@ -325,6 +326,58 @@ func TestAccessControlHandlers(t *testing.T) {
 	})
 }
 
+func TestBrowserEntryAndFeedback(t *testing.T) {
+	ac := &mockAccessControlService{}
+	app := NewApp(ac, nil, nil)
+
+	t.Run("root redirects to login without session", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
+			t.Fatalf("root redirect: status=%d location=%q", rec.Code, rec.Header().Get("Location"))
+		}
+	})
+
+	t.Run("root redirects to dashboard with session", func(t *testing.T) {
+		ac.validateSessionFunc = func(_ context.Context, token string) (int, error) {
+			if token != "valid-session" {
+				t.Errorf("unexpected token %q", token)
+			}
+			return 7, nil
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "valid-session"})
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/dashboard" {
+			t.Fatalf("root redirect: status=%d location=%q", rec.Code, rec.Header().Get("Location"))
+		}
+	})
+
+	t.Run("login error stays on form without showing password", func(t *testing.T) {
+		ac.loginFunc = func(context.Context, string, string) (string, error) {
+			return "", errors.New("invalid credentials")
+		}
+		form := url.Values{"username": {"alice"}, "password": {"very-secret-password"}}
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if rec.Code != http.StatusUnauthorized || !strings.Contains(body, `role="alert"`) || !strings.Contains(body, `value="alice"`) || strings.Contains(body, "very-secret-password") {
+			t.Fatalf("login feedback: status=%d body=%s", rec.Code, body)
+		}
+	})
+
+	t.Run("stylesheet is served", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/app.css", nil))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), "text/css") || !strings.Contains(rec.Body.String(), ".card") {
+			t.Fatalf("stylesheet: status=%d type=%q", rec.Code, rec.Header().Get("Content-Type"))
+		}
+	})
+}
+
 func TestDBManagementHandlers(t *testing.T) {
 	mockAC := &mockAccessControlService{}
 	mockDBM := &mockDBManagementService{}
@@ -380,22 +433,22 @@ func TestDBManagementHandlers(t *testing.T) {
 		mockDBM.listDatabasesFunc = func(ctx context.Context) ([]models.TargetDBInfo, error) {
 			return []models.TargetDBInfo{
 				{
-					ID:       1,
-					Name:     "production_pg",
-					DBType:   "postgres",
-					Host:     "localhost",
-					Port:     5432,
-					User:     "postgres",
-					DBName:   "prod_db",
+					ID:     1,
+					Name:   "production_pg",
+					DBType: "postgres",
+					Host:   "localhost",
+					Port:   5432,
+					User:   "postgres",
+					DBName: "prod_db",
 				},
 				{
-					ID:       2,
-					Name:     "analytics_pg",
-					DBType:   "postgres",
-					Host:     "localhost",
-					Port:     5432,
-					User:     "postgres",
-					DBName:   "analytics_db",
+					ID:     2,
+					Name:   "analytics_pg",
+					DBType: "postgres",
+					Host:   "localhost",
+					Port:   5432,
+					User:   "postgres",
+					DBName: "analytics_db",
 				},
 			}, nil
 		}
@@ -432,7 +485,7 @@ func TestDBManagementHandlers(t *testing.T) {
 			t.Fatalf("admin dashboard: status=%d body=%s", rec.Code, rec.Body.String())
 		}
 		body := rec.Body.String()
-		if !strings.Contains(body, `href="/admin"`) || !strings.Contains(body, "No databases available") {
+		if !strings.Contains(body, `href="/admin"`) || !strings.Contains(body, "Belum ada database") {
 			t.Errorf("admin link or empty state missing: %s", body)
 		}
 		if strings.Contains(body, "production_pg") || strings.Contains(body, "analytics_pg") {
@@ -557,7 +610,7 @@ func TestDBManagementHandlers(t *testing.T) {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 		body := rec.Body.String()
-		if !strings.Contains(body, `id`) || !strings.Contains(body, `1`) || !strings.Contains(body, `email`) || !strings.Contains(body, `alice@example.com`) {
+		if !strings.Contains(body, `<th scope="col">email</th>`) || !strings.Contains(body, `<th scope="col">id</th>`) || !strings.Contains(body, `<td>alice@example.com</td>`) {
 			t.Errorf("wrong table data, got:\n %s", body)
 		}
 	})
@@ -633,7 +686,48 @@ func TestAdminBrowserForms(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("expected 400 for invalid numeric field, got %d", rec.Code)
 		}
+		body := rec.Body.String()
+		if !strings.Contains(body, `role="alert"`) || !strings.Contains(body, `value="3"`) || !strings.Contains(body, "ID pengguna dan grup") {
+			t.Errorf("expected inline error and preserved group ID, got %s", body)
+		}
 	})
+
+	t.Run("failed database form does not echo password", func(t *testing.T) {
+		mockDBM.registerTargetDBFunc = func(context.Context, models.TargetDBInfo) (int, error) {
+			return 0, errors.New("connection refused")
+		}
+		form := url.Values{"name": {"production"}, "db_type": {"postgres"}, "host": {"localhost"}, "port": {"5432"}, "user": {"postgres"}, "password": {"very-secret-password"}, "db_name": {"prod_db"}}
+		req := httptest.NewRequest(http.MethodPost, "/admin/databases", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		app.handleRegisterTargetDB(rec, req)
+		body := rec.Body.String()
+		if rec.Code != http.StatusInternalServerError || !strings.Contains(body, `role="alert"`) || !strings.Contains(body, `value="production"`) || strings.Contains(body, "very-secret-password") {
+			t.Fatalf("database form feedback: status=%d body=%s", rec.Code, body)
+		}
+	})
+}
+
+func TestMigrationFormErrorKeepsSQL(t *testing.T) {
+	ac := &mockAccessControlService{}
+	mig := &mockMigrationService{}
+	app := NewApp(ac, nil, mig)
+	ac.validateSessionFunc = func(context.Context, string) (int, error) { return 7, nil }
+	ac.evaluateDBAccessFunc = func(context.Context, int, int, string) error { return nil }
+	mig.createDraftFunc = func(context.Context, int, string) (int, error) { return 0, errors.New("database unavailable") }
+	mig.getLinearHistoryFunc = func(context.Context, int) ([]models.MigrationRecord, error) { return nil, nil }
+	mig.getDraftsFunc = func(context.Context, int) ([]models.MigrationRecord, error) { return nil, nil }
+
+	sql := "CREATE TABLE example (id INT);"
+	req := httptest.NewRequest(http.MethodPost, "/databases/1/migrations", strings.NewReader(url.Values{"sql_query": {sql}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "editor-session"})
+	req.SetPathValue("dbID", "1")
+	rec := httptest.NewRecorder()
+	app.handleCreateMigrationDraft(rec, req)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), sql) || !strings.Contains(rec.Body.String(), `role="alert"`) {
+		t.Fatalf("migration form feedback: status=%d body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestMigrationHandlers(t *testing.T) {
