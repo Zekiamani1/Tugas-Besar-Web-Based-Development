@@ -20,7 +20,7 @@ type mockAccessControlService struct {
 	registerFunc          func(ctx context.Context, username, password string) error
 	loginFunc             func(ctx context.Context, username, password string) (string, error)
 	logoutFunc            func(ctx context.Context, sessionID string) error
-	validateSessionFunc   func(ctx context.Context, sessionID string) error
+	validateSessionFunc   func(ctx context.Context, sessionID string) (int, error)
 	createGroupFunc       func(ctx context.Context, groupName string) error
 	assignUserToGroupFunc func(ctx context.Context, userID, groupID int) error
 	setGroupDBAccessFunc  func(ctx context.Context, groupID, targetDBID int, accessLevel string) error
@@ -38,11 +38,11 @@ func (m *mockAccessControlService) Logout(ctx context.Context, sessionID string)
 	return m.logoutFunc(ctx, sessionID)
 }
 
-func (m *mockAccessControlService) ValidateSession(ctx context.Context, sessionID string) error {
+func (m *mockAccessControlService) ValidateSession(ctx context.Context, sessionID string) (int, error) {
 	if m.validateSessionFunc != nil {
 		return m.validateSessionFunc(ctx, sessionID)
 	}
-	return nil
+	return 0,nil
 }
 
 func (m *mockAccessControlService) CreateGroup(ctx context.Context, groupName string) error {
