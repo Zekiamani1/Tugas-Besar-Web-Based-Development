@@ -60,6 +60,7 @@ func (m *mockAccessControlService) SetGroupDBAccess(ctx context.Context, groupID
 type mockDBManagementService struct {
 	interfaces.DBManagementService
 	registerTargetDBFunc func(ctx context.Context, info models.TargetDBInfo) (int, error)
+	listDatabasesFunc    func(ctx context.Context) ([]models.TargetDBInfo, error)
 	getSchemasFunc       func(ctx context.Context, targetDBID int) ([]string, error)
 	getTablesFunc        func(ctx context.Context, targetDBID int, schema string) ([]string, error)
 	getTableDetailsFunc  func(ctx context.Context, targetDBID int, schema, tableName string) (*models.TableMetadata, error)
@@ -68,6 +69,13 @@ type mockDBManagementService struct {
 
 func (m *mockDBManagementService) RegisterTargetDB(ctx context.Context, info models.TargetDBInfo) (int, error) {
 	return m.registerTargetDBFunc(ctx, info)
+}
+
+func (m *mockDBManagementService) ListDatabases(ctx context.Context) ([]models.TargetDBInfo, error) {
+	if m.listDatabasesFunc != nil {
+		return m.listDatabasesFunc(ctx)
+	}
+	return nil, nil
 }
 
 func (m *mockDBManagementService) GetTargetConnection(ctx context.Context, targetDBID int) (*sql.DB, error) {
@@ -304,6 +312,60 @@ func TestDBManagementHandlers(t *testing.T) {
 
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "DB ditambahkan dengan id 1") {
 			t.Errorf("expected 200 OK with success message on admin page, got code=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("Dashboard", func(t *testing.T) {
+		mockDBM.listDatabasesFunc = func(ctx context.Context) ([]models.TargetDBInfo, error) {
+			return []models.TargetDBInfo{
+				{
+					ID:       1,
+					Name:     "production_pg",
+					DBType:   "postgres",
+					Host:     "localhost",
+					Port:     5432,
+					User:     "postgres",
+					DBName:   "prod_db",
+				},
+				{
+					ID:       2,
+					Name:     "analytics_pg",
+					DBType:   "postgres",
+					Host:     "localhost",
+					Port:     5432,
+					User:     "postgres",
+					DBName:   "analytics_db",
+				},
+			}, nil
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+		rec := httptest.NewRecorder()
+		app.handleDashboard(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "production_pg") || !strings.Contains(body, "/databases/1/schemas") {
+			t.Errorf("expected production_pg and link /databases/1/schemas, got:\n%s", body)
+		}
+		if !strings.Contains(body, "analytics_pg") || !strings.Contains(body, "/databases/2/schemas") {
+			t.Errorf("expected analytics_pg and link /databases/2/schemas, got:\n%s", body)
+		}
+	})
+
+	t.Run("DatabaseRedirect", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/databases/1", nil)
+		req.SetPathValue("dbID", "1")
+		rec := httptest.NewRecorder()
+		app.handleDatabaseRedirect(rec, req)
+
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("expected 303 redirect, got %d", rec.Code)
+		}
+		if loc := rec.Header().Get("Location"); loc != "/databases/1/schemas" {
+			t.Errorf("expected redirect to /databases/1/schemas, got %s", loc)
 		}
 	})
 

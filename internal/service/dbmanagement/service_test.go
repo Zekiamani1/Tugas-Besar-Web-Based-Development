@@ -60,6 +60,21 @@ func TestConnectionManagement(t *testing.T) {
 		}
 	})
 
+	t.Run("ListDatabases", func(t *testing.T) {
+		internalMock.ExpectQuery(`SELECT .* FROM "target_db_infos"`).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "name", "db_type", "host", "port", "user", "password", "db_name"}).
+				AddRow(1, "production_pg", "postgres", "localhost", 5432, "postgres", "secret", "prod_db").
+				AddRow(2, "analytics_pg", "postgres", "localhost", 5432, "postgres", "secret", "analytics_db"))
+
+		dbs, err := svc.ListDatabases(ctx)
+		if err != nil {
+			t.Fatalf("expected ListDatabases to succeed, got error: %v", err)
+		}
+		if len(dbs) != 2 || dbs[0].Name != "production_pg" || dbs[1].Name != "analytics_pg" {
+			t.Errorf("unexpected databases list: %+v", dbs)
+		}
+	})
+
 	t.Run("GetTargetConnection", func(t *testing.T) {
 		targetDB, targetMock, err := sqlmock.NewWithDSN("sqlmock://postgres:secret@localhost:5432/prod_db?sslmode=disable")
 		if err != nil {

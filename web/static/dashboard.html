@@ -9,5 +9,14 @@
 			<button type="submit">Logout</button>
 		</form>
 	</nav>
+
+	<h2>Databases</h2>
+	<ul>
+	{{range .Databases}}
+		<li>
+			<a href="/databases/{{.ID}}/schemas">{{.Name}}</a> ({{.DBType}} - {{.Host}}:{{.Port}}/{{.DBName}})
+		</li>
+	{{end}}
+	</ul>
 </body>
 </html>

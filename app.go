@@ -40,6 +40,7 @@ func NewApp(
 	app.Handle("POST /admin/groups/members", middleware.RequireAdminAccess(app, app.handleAssignUserToGroup))
 	app.Handle("POST /admin/groups/permissions", middleware.RequireAdminAccess(app, app.handleSetGroupDBAccess))
 	app.Handle("POST /admin/databases", middleware.RequireAdminAccess(app, app.handleRegisterTargetDB))
+	app.Handle("GET /databases/{dbID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleDatabaseRedirect))
 	app.Handle("GET /databases/{dbID}/schemas", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetSchemas))
 	app.Handle("GET /databases/{dbID}/schemas/{schema}/tables", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetTables))
 	app.Handle("GET /databases/{dbID}/schemas/{schema}/tables/{table}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetTableDetails))
@@ -57,7 +58,33 @@ func (app *App) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "web/static/login.html")
 }
 func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, "web/static/dashboard.html")
+	dbs, err := app.ListDatabases(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.ParseFiles("web/templates/dashboard.html")
+	if err != nil {
+		tmpl, err = template.ParseFiles("web/static/dashboard.html")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	tmpl.Execute(w, struct {
+		Databases []models.TargetDBInfo
+	}{
+		Databases: dbs,
+	})
+}
+
+func (app *App) handleDatabaseRedirect(w http.ResponseWriter, r *http.Request) {
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/databases/%d/schemas", dbID), http.StatusSeeOther)
 }
 
 func (app *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
