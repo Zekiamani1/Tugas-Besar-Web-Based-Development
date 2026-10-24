@@ -11,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"wbd/internal/middleware"
 	"wbd/internal/models"
+	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/interfaces"
 )
 
@@ -479,8 +481,9 @@ func TestDBManagementHandlers(t *testing.T) {
 }
 
 func TestMigrationHandlers(t *testing.T) {
+	mockAC := &mockAccessControlService{}
 	mockMig := &mockMigrationService{}
-	app := NewApp(nil, nil, mockMig)
+	app := NewApp(mockAC, nil, mockMig)
 
 	t.Run("GetMigrationHistory", func(t *testing.T) {
 		mockMig.getLinearHistoryFunc = func(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error) {
@@ -534,6 +537,9 @@ func TestMigrationHandlers(t *testing.T) {
 		body := rec.Body.String()
 		if !strings.Contains(body, `2`) || !strings.Contains(body, `ALTER TABLE users ADD email TEXT;`) || !strings.Contains(body, `DRAFT`) || !strings.Contains(body, `alice`) {
 			t.Errorf("wrong migration detail, got:\n %s", body)
+		}
+		if strings.Contains(body, `name="token"`) {
+			t.Errorf("execute form must not ask for an execution token, got:\n%s", body)
 		}
 	})
 
@@ -615,10 +621,16 @@ func TestMigrationHandlers(t *testing.T) {
 		}
 	})
 
-	t.Run("ExecuteMigration", func(t *testing.T) {
-		mockMig.executeMigrationFunc = func(ctx context.Context, targetDBID, migrationID int, token string) (*models.MigrationRecord, error) {
-			if targetDBID != 1 || migrationID != 3 || token != "exec-token-xyz" {
-				t.Errorf("unexpected execute migration args: (%d, %d, %s)", targetDBID, migrationID, token)
+	t.Run("ExecuteMigrationFromSession", func(t *testing.T) {
+		mockAC.validateSessionFunc = func(ctx context.Context, sessionID string) (int, error) {
+			if sessionID != "valid-session" {
+				t.Errorf("unexpected session ID: %s", sessionID)
+			}
+			return 7, nil
+		}
+		mockMig.executeMigrationFunc = func(ctx context.Context, targetDBID, migrationID int, executedBy string) (*models.MigrationRecord, error) {
+			if targetDBID != 1 || migrationID != 3 || executedBy != "7" {
+				t.Errorf("unexpected execute migration args: (%d, %d, %s)", targetDBID, migrationID, executedBy)
 			}
 			return &models.MigrationRecord{
 				ID:         3,
@@ -626,13 +638,14 @@ func TestMigrationHandlers(t *testing.T) {
 				Version:    3,
 				SQLQuery:   "CREATE TABLE orders (id SERIAL PRIMARY KEY);",
 				Status:     "APPLIED",
-				ExecutedBy: "alice",
+				ExecutedBy: executedBy,
 			}, nil
 		}
 
-		req := newJSONRequest(t, http.MethodPost, "/databases/1/migrations/3/execute", map[string]any{
-			"token": "exec-token-xyz",
-		})
+		body := url.Values{"token": {"forged-user"}}.Encode()
+		req := httptest.NewRequest(http.MethodPost, "/databases/1/migrations/3/execute", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "valid-session"})
 		req.SetPathValue("dbID", "1")
 		req.SetPathValue("migrationID", "3")
 		rec := httptest.NewRecorder()
@@ -640,6 +653,40 @@ func TestMigrationHandlers(t *testing.T) {
 
 		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/databases/1/migrations/3" {
 			t.Errorf("expected 303 redirect to /databases/1/migrations/3, got code=%d loc=%s", rec.Code, rec.Header().Get("Location"))
+		}
+	})
+
+	t.Run("ExecuteMigrationWithoutSession", func(t *testing.T) {
+		mockMig.executeMigrationFunc = func(context.Context, int, int, string) (*models.MigrationRecord, error) {
+			t.Fatal("migration must not execute without a session")
+			return nil, nil
+		}
+		req := httptest.NewRequest(http.MethodPost, "/databases/1/migrations/3/execute", nil)
+		req.SetPathValue("dbID", "1")
+		req.SetPathValue("migrationID", "3")
+		rec := httptest.NewRecorder()
+		app.handleExecuteMigration(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401 without session, got %d", rec.Code)
+		}
+	})
+
+	t.Run("ExecuteMigrationWithInvalidSession", func(t *testing.T) {
+		mockAC.validateSessionFunc = func(context.Context, string) (int, error) {
+			return 0, accesscontrol.ErrInvalidSession
+		}
+		mockMig.executeMigrationFunc = func(context.Context, int, int, string) (*models.MigrationRecord, error) {
+			t.Fatal("migration must not execute with an invalid session")
+			return nil, nil
+		}
+		req := httptest.NewRequest(http.MethodPost, "/databases/1/migrations/3/execute", nil)
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "invalid-session"})
+		req.SetPathValue("dbID", "1")
+		req.SetPathValue("migrationID", "3")
+		rec := httptest.NewRecorder()
+		app.handleExecuteMigration(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401 for invalid session, got %d", rec.Code)
 		}
 	})
 }

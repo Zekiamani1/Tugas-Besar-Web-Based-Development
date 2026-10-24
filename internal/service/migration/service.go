@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
 	"gorm.io/gorm"
+
 	"wbd/internal/models"
 	"wbd/internal/service/interfaces"
 )
@@ -18,8 +20,10 @@ const (
 )
 
 var (
-	ErrInvalidMigration = errors.New("invalid migration")
-	ErrDraftNotFound    = errors.New("migration draft not found")
+	ErrInvalidMigration       = errors.New("invalid migration")
+	ErrDraftNotFound          = errors.New("migration draft not found")
+	ErrTargetCommitUncertain  = errors.New("target commit could not be confirmed; inspect the target database before retrying")
+	ErrHistoryUpdateUncertain = errors.New("target migration committed but history update could not be confirmed; inspect the target database before retrying")
 )
 
 type Service struct {
@@ -108,6 +112,7 @@ func (s *Service) ExecuteMigration(ctx context.Context, targetDBID, migrationID 
 
 	var record models.MigrationRecord
 	var executionErr error
+	targetCommitted := false
 	err := s.internalDB.WithContext(ctx).Transaction(func(meta *gorm.DB) error {
 		if err := meta.Exec("SELECT pg_advisory_xact_lock(3110, ?)", targetDBID).Error; err != nil {
 			return err
@@ -148,8 +153,10 @@ func (s *Service) ExecuteMigration(ctx context.Context, targetDBID, migrationID 
 			return s.recordFailure(meta, &record, executedBy, err, &executionErr)
 		}
 		if err := targetTx.Commit(); err != nil {
-			return s.recordFailure(meta, &record, executedBy, err, &executionErr)
+			// A commit error does not prove whether the target applied the SQL.
+			return fmt.Errorf("%w: %v", ErrTargetCommitUncertain, err)
 		}
+		targetCommitted = true
 
 		record.Version = lastVersion + 1
 		record.Status = StatusApplied
@@ -158,6 +165,9 @@ func (s *Service) ExecuteMigration(ctx context.Context, targetDBID, migrationID 
 		return meta.Save(&record).Error
 	})
 	if err != nil {
+		if targetCommitted {
+			return nil, fmt.Errorf("%w: %v", ErrHistoryUpdateUncertain, err)
+		}
 		return nil, err
 	}
 	if executionErr != nil {
