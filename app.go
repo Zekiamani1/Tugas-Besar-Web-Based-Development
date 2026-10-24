@@ -41,6 +41,9 @@ func NewApp(
 	app.HandleFunc("GET /login", app.handleLoginPage)
 	app.Handle("GET /dashboard", middleware.RequireAuth(app, app.handleDashboard))
 	app.Handle("GET /admin", middleware.RequireAdminAccess(app, app.handleAdminPage))
+	app.Handle("GET /admin/users", middleware.RequireAdminAccess(app, app.handleAdminUsersPage))
+	app.Handle("GET /admin/groups", middleware.RequireAdminAccess(app, app.handleAdminGroupsPage))
+	app.Handle("GET /admin/databases", middleware.RequireAdminAccess(app, app.handleAdminDatabasesPage))
 	app.HandleFunc("POST /login", app.handleLogin)
 	app.Handle("POST /logout", middleware.RequireAuth(app, app.handleLogout))
 	app.Handle("POST /admin/users", middleware.RequireAdminAccess(app, app.handleRegisterUser))
@@ -181,6 +184,71 @@ func renderAdminPage(w http.ResponseWriter, status int, data adminPageData) {
 
 func (app *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 	renderAdminPage(w, http.StatusOK, adminPageData{})
+}
+
+func (app *App) handleAdminUsersPage(w http.ResponseWriter, r *http.Request) {
+	users, err := app.ListUsers(r.Context())
+	if err != nil {
+		http.Error(w, "user list unavailable", http.StatusInternalServerError)
+		return
+	}
+	renderAdminListPage(w, "admin_users.html", struct {
+		Users []models.UserSummary
+	}{Users: users})
+}
+
+func (app *App) handleAdminGroupsPage(w http.ResponseWriter, r *http.Request) {
+	groups, err := app.ListGroups(r.Context())
+	if err != nil {
+		http.Error(w, "group list unavailable", http.StatusInternalServerError)
+		return
+	}
+	renderAdminListPage(w, "admin_groups.html", struct {
+		Groups []models.GroupSummary
+	}{Groups: groups})
+}
+
+type adminDatabaseSummary struct {
+	ID     int
+	Name   string
+	DBType string
+	Host   string
+	Port   int
+	DBName string
+}
+
+func (app *App) handleAdminDatabasesPage(w http.ResponseWriter, r *http.Request) {
+	databases, err := app.ListDatabases(r.Context())
+	if err != nil {
+		http.Error(w, "database list unavailable", http.StatusInternalServerError)
+		return
+	}
+	summaries := make([]adminDatabaseSummary, 0, len(databases))
+	for _, database := range databases {
+		summaries = append(summaries, adminDatabaseSummary{
+			ID:     database.ID,
+			Name:   database.Name,
+			DBType: database.DBType,
+			Host:   database.Host,
+			Port:   database.Port,
+			DBName: database.DBName,
+		})
+	}
+	renderAdminListPage(w, "admin_databases.html", struct {
+		Databases []adminDatabaseSummary
+	}{Databases: summaries})
+}
+
+func renderAdminListPage(w http.ResponseWriter, page string, data any) {
+	tmpl, err := template.ParseFiles("web/templates/" + page)
+	if err != nil {
+		http.Error(w, "admin list page unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.Execute(w, data); err != nil {
+		return
+	}
 }
 
 func isFormRequest(r *http.Request) bool {

@@ -8,7 +8,7 @@
 </head>
 <body>
 	<main class="page">
-		<header class="page-header"><div><p class="eyebrow">Database Manager</p><h1>Admin Panel</h1></div><nav><a href="/dashboard">Dashboard</a></nav></header>
+		<header class="page-header"><div><p class="eyebrow">Database Manager</p><h1>Admin Panel</h1></div><nav><a href="/admin/users">Users</a><a href="/admin/groups">Groups</a><a href="/admin/databases">Databases</a><a href="/dashboard">Dashboard</a></nav></header>
 		{{if and .Message (not .IsError)}}<p class="message success" role="status">{{.Message}}</p>{{end}}
 		<div class="card-grid">
 			<section class="card"><h2>Register User</h2>
