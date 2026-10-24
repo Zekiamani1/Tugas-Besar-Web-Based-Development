@@ -133,7 +133,6 @@ func (s *Service) Register(ctx context.Context, username, password string) error
 	return nil
 }
 
-// ListUsers returns safe user details for admin pages, ordered by ID.
 func (s *Service) ListUsers(ctx context.Context) ([]models.UserSummary, error) {
 	var users []models.UserSummary
 	if err := s.db.WithContext(ctx).
@@ -146,9 +145,8 @@ func (s *Service) ListUsers(ctx context.Context) ([]models.UserSummary, error) {
 	return users, nil
 }
 
-// ListGroups returns group IDs and names for admin pages, ordered by ID.
-func (s *Service) ListGroups(ctx context.Context) ([]models.GroupSummary, error) {
-	var groups []models.GroupSummary
+func (s *Service) ListGroups(ctx context.Context) ([]models.Group, error) {
+	var groups []models.Group
 	if err := s.db.WithContext(ctx).
 		Model(&models.Group{}).
 		Select("id", "name").
@@ -157,6 +155,34 @@ func (s *Service) ListGroups(ctx context.Context) ([]models.GroupSummary, error)
 		return nil, fmt.Errorf("list groups: %w", err)
 	}
 	return groups, nil
+}
+
+func (s *Service) ListGroupMembers(ctx context.Context) ([]models.GroupMemberSummary, error) {
+	var members []models.GroupMemberSummary
+	err := s.db.WithContext(ctx).
+		Table("user_groups").
+		Select("user_groups.group_id, users.id AS user_id, users.username").
+		Joins("JOIN users ON users.id = user_groups.user_id").
+		Order("user_groups.group_id ASC, users.id ASC").
+		Scan(&members).Error
+	if err != nil {
+		return nil, fmt.Errorf("list group members: %w", err)
+	}
+	return members, nil
+}
+
+func (s *Service) ListGroupDBAccess(ctx context.Context) ([]models.GroupDBAccessSummary, error) {
+	var accesses []models.GroupDBAccessSummary
+	err := s.db.WithContext(ctx).
+		Table("group_db_accesses").
+		Select("group_db_accesses.group_id, group_db_accesses.target_db_id, target_db_infos.name AS database_name, group_db_accesses.access_level").
+		Joins("JOIN target_db_infos ON target_db_infos.id = group_db_accesses.target_db_id").
+		Order("group_db_accesses.group_id ASC, group_db_accesses.target_db_id ASC").
+		Scan(&accesses).Error
+	if err != nil {
+		return nil, fmt.Errorf("list group database access: %w", err)
+	}
+	return accesses, nil
 }
 
 func (s *Service) Login(ctx context.Context, username, password string) (string, error) {

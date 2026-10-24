@@ -662,7 +662,7 @@ func TestListGroupsReturnsDetailsInIDOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListGroups returned error: %v", err)
 	}
-	if len(groups) != 2 || groups[0] != (models.GroupSummary{ID: 1, Name: "analysts"}) || groups[1] != (models.GroupSummary{ID: 3, Name: "developers"}) {
+	if len(groups) != 2 || groups[0] != (models.Group{ID: 1, Name: "analysts"}) || groups[1] != (models.Group{ID: 3, Name: "developers"}) {
 		t.Fatalf("unexpected group summaries: %+v", groups)
 	}
 	assertExpectations(t, mock)

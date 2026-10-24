@@ -212,7 +212,7 @@ type adminPageData struct {
 	ErrorForm string
 	Values    url.Values
 	Users     []models.UserSummary
-	Groups    []models.GroupSummary
+	Groups    []models.Group
 	Databases []adminDatabaseSummary
 	CSRFToken string
 }
@@ -269,9 +269,57 @@ func (app *App) handleAdminGroupsPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "group list unavailable", http.StatusInternalServerError)
 		return
 	}
+	members, err := app.ListGroupMembers(r.Context())
+	if err != nil {
+		http.Error(w, "group member list unavailable", http.StatusInternalServerError)
+		return
+	}
+	accesses, err := app.ListGroupDBAccess(r.Context())
+	if err != nil {
+		http.Error(w, "group database access list unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	type groupMember struct {
+		ID       int
+		Username string
+	}
+	type groupDatabaseAccess struct {
+		TargetDBID   int
+		DatabaseName string
+		AccessLevel  string
+	}
+	type groupDetail struct {
+		ID             int
+		Name           string
+		Members        []groupMember
+		DatabaseAccess []groupDatabaseAccess
+	}
+
+	details := make([]groupDetail, 0, len(groups))
+	groupIndex := make(map[int]int, len(groups))
+	for _, group := range groups {
+		groupIndex[group.ID] = len(details)
+		details = append(details, groupDetail{ID: group.ID, Name: group.Name})
+	}
+	for _, member := range members {
+		if index, exists := groupIndex[member.GroupID]; exists {
+			details[index].Members = append(details[index].Members, groupMember{ID: member.UserID, Username: member.Username})
+		}
+	}
+	for _, access := range accesses {
+		if index, exists := groupIndex[access.GroupID]; exists {
+			details[index].DatabaseAccess = append(details[index].DatabaseAccess, groupDatabaseAccess{
+				TargetDBID:   access.TargetDBID,
+				DatabaseName: access.DatabaseName,
+				AccessLevel:  access.AccessLevel,
+			})
+		}
+	}
+
 	renderAdminListPage(w, "admin_groups.html", struct {
-		Groups []models.GroupSummary
-	}{Groups: groups})
+		Groups []groupDetail
+	}{Groups: details})
 }
 
 type adminDatabaseSummary struct {
