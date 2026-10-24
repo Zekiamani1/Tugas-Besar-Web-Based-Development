@@ -23,6 +23,18 @@ type App struct {
 	*http.ServeMux
 }
 
+func (app *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	middleware.CSRFProtection(app.ServeMux).ServeHTTP(w, r)
+}
+
+func csrfTokenFromRequest(r *http.Request) string {
+	cookie, err := r.Cookie(middleware.CSRFTokenCookieName)
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+
 func NewApp(
 	acSvc interfaces.AccessControlService,
 	dbmSvc interfaces.DBManagementService,
@@ -82,8 +94,9 @@ func (app *App) handleHome(w http.ResponseWriter, r *http.Request) {
 }
 
 type loginPageData struct {
-	Username string
-	Error    string
+	Username  string
+	Error     string
+	CSRFToken string
 }
 
 func renderLoginPage(w http.ResponseWriter, status int, data loginPageData) {
@@ -98,7 +111,7 @@ func renderLoginPage(w http.ResponseWriter, status int, data loginPageData) {
 }
 
 func (app *App) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	data := loginPageData{}
+	data := loginPageData{CSRFToken: csrfTokenFromRequest(r)}
 	if r.URL.Query().Get("reason") == "session" {
 		data.Error = "Sesi berakhir atau Anda belum login. Silakan masuk kembali."
 	}
@@ -149,9 +162,11 @@ func (app *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	tmpl.Execute(w, struct {
 		Databases []models.TargetDBInfo
 		IsAdmin   bool
+		CSRFToken string
 	}{
 		Databases: accessibleDBs,
 		IsAdmin:   isAdmin,
+		CSRFToken: csrfTokenFromRequest(r),
 	})
 }
 
@@ -172,6 +187,7 @@ type adminPageData struct {
 	Users     []models.UserSummary
 	Groups    []models.GroupSummary
 	Databases []adminDatabaseSummary
+	CSRFToken string
 }
 
 func (app *App) renderAdminPage(w http.ResponseWriter, r *http.Request, status int, data adminPageData) {
@@ -193,6 +209,7 @@ func (app *App) renderAdminPage(w http.ResponseWriter, r *http.Request, status i
 	data.Users = users
 	data.Groups = groups
 	data.Databases = summarizeAdminDatabases(databases)
+	data.CSRFToken = csrfTokenFromRequest(r)
 
 	tmpl, err := template.ParseFiles("web/templates/admin.html")
 	if err != nil {
@@ -317,7 +334,7 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}); err != nil {
 		if isFormRequest(r) {
-			renderLoginPage(w, http.StatusBadRequest, loginPageData{Error: "Periksa kembali isian login."})
+			renderLoginPage(w, http.StatusBadRequest, loginPageData{Error: "Periksa kembali isian login.", CSRFToken: csrfTokenFromRequest(r)})
 		} else {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 		}
@@ -326,7 +343,7 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	sessionID, err := app.Login(r.Context(), req.Username, req.Password)
 	if err != nil {
 		if isFormRequest(r) {
-			renderLoginPage(w, http.StatusUnauthorized, loginPageData{Username: req.Username, Error: "Username atau password salah."})
+			renderLoginPage(w, http.StatusUnauthorized, loginPageData{Username: req.Username, Error: "Username atau password salah.", CSRFToken: csrfTokenFromRequest(r)})
 		} else {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 		}
@@ -337,6 +354,7 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
@@ -357,10 +375,11 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:   "session_id",
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
+		Name:     "session_id",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
@@ -666,6 +685,7 @@ func (app *App) renderMigrationHistory(w http.ResponseWriter, r *http.Request, d
 		CanEdit    bool
 		Error      string
 		DraftSQL   string
+		CSRFToken  string
 	}{
 		DBID:       dbID,
 		Migrations: history,
@@ -673,6 +693,7 @@ func (app *App) renderMigrationHistory(w http.ResponseWriter, r *http.Request, d
 		CanEdit:    canEdit,
 		Error:      pageError,
 		DraftSQL:   draftSQL,
+		CSRFToken:  csrfTokenFromRequest(r),
 	})
 }
 
@@ -717,11 +738,13 @@ func (app *App) renderMigrationDetail(w http.ResponseWriter, r *http.Request, db
 		CanEdit   bool
 		Error     string
 		EditedSQL string
+		CSRFToken string
 	}{
 		MigrationRecord: detail,
 		CanEdit:         canEdit,
 		Error:           pageError,
 		EditedSQL:       editedSQL,
+		CSRFToken:       csrfTokenFromRequest(r),
 	})
 }
 

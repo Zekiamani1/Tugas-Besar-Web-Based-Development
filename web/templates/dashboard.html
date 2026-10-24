@@ -8,6 +8,7 @@
 		<a href="/admin">Admin Panel</a>
 		{{end}}
 		<form method="POST" action="/logout">
+			<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 			<button type="submit">Logout</button>
 		</form>
 	</nav></header>

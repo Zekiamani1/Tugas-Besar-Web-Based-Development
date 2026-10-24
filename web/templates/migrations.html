@@ -7,6 +7,7 @@
 	{{if .CanEdit}}
 	<section class="card"><h2>Create Draft</h2>
 	<form method="POST" action="/databases/{{.DBID}}/migrations">
+		<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 		<label for="draft-sql">SQL Query</label><textarea id="draft-sql" name="sql_query" placeholder="CREATE TABLE ..." required>{{.DraftSQL}}</textarea>
 		{{if .Error}}<p class="message error" role="alert">{{.Error}}</p>{{end}}
 		<button type="submit">Create Draft</button>
