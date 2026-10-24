@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -32,7 +33,42 @@ const (
 
 func NewService(db *gorm.DB, sessionConfig SessionConfig) *Service {
 	db.AutoMigrate(&models.User{}, &models.Session{}, &models.Group{}, &models.UserGroup{}, &models.GroupDBAccess{})
+	seedAdmin(db)
 	return &Service{db: db, sessionConfig: sessionConfig}
+}
+
+func seedAdmin(db *gorm.DB) {
+	username := strings.TrimSpace(os.Getenv("ADMIN_USERNAME"))
+	if username == "" {
+		username = strings.TrimSpace(os.Getenv("INITIAL_ADMIN_USERNAME"))
+	}
+	password := strings.TrimSpace(os.Getenv("ADMIN_PASSWORD"))
+	if password == "" {
+		password = strings.TrimSpace(os.Getenv("INITIAL_ADMIN_PASSWORD"))
+	}
+	if username == "" || password == "" {
+		return
+	}
+
+	var existing models.User
+	if err := db.Where("username = ?", username).First(&existing).Error; err == nil {
+		if !existing.IsAdmin {
+			db.Model(&models.User{}).Where("id = ?", existing.ID).Update("is_admin", true)
+		}
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return
+	}
+
+	admin := models.User{
+		Username:     username,
+		PasswordHash: string(hash),
+		IsAdmin:      true,
+	}
+	db.Clauses(clause.OnConflict{DoNothing: true}).Create(&admin)
 }
 
 // fungsi tambahan buat cek apakah admint
