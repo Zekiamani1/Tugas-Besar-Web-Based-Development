@@ -1,29 +1,31 @@
 <!DOCTYPE html>
-<html>
-<head><title>Table Details</title></head>
+<html lang="id">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Table Details · Database Manager</title><link rel="stylesheet" href="/static/app.css"></head>
 <body>
-	<h1>{{.Metadata.Schema}}.{{.Metadata.TableName}}</h1>
-	<nav>
-		<a href="/databases/{{.DBID}}/schemas/{{.Metadata.Schema}}/tables">Back to Tables</a> |
+	<main class="page"><header class="page-header"><div><p class="eyebrow">Table Details</p><h1>{{.Metadata.Schema}}.{{.Metadata.TableName}}</h1></div><nav>
+		<a href="/databases/{{.DBID}}/schemas/{{.Metadata.Schema}}/tables">Back to Tables</a>
 		<a href="/databases/{{.DBID}}/schemas/{{.Metadata.Schema}}/tables/{{.Metadata.TableName}}/data">View Table Data</a>
-	</nav>
-	<h2>Columns</h2>
-	<ul>
+	</nav></header>
+	<section class="card"><h2>Columns</h2><ul class="item-list">
 	{{range .Metadata.Columns}}
 		<li>{{.Name}} ({{.DataType}}) Nullable: {{.IsNullable}}</li>
+	{{else}}
+		<li class="empty-state">Tidak ada kolom yang dapat ditampilkan.</li>
 	{{end}}
-	</ul>
-	<h2>Constraints</h2>
-	<ul>
+	</ul></section>
+	<section class="card"><h2>Constraints</h2><ul class="item-list">
 	{{range .Metadata.Constraints}}
 		<li>{{.Name}} ({{.Type}})</li>
+	{{else}}
+		<li class="empty-state">Tidak ada constraint.</li>
 	{{end}}
-	</ul>
-	<h2>Indexes</h2>
-	<ul>
+	</ul></section>
+	<section class="card"><h2>Indexes</h2><ul class="item-list">
 	{{range .Metadata.Indexes}}
 		<li>{{.Name}} Unique: {{.IsUnique}}</li>
+	{{else}}
+		<li class="empty-state">Tidak ada index.</li>
 	{{end}}
-	</ul>
+	</ul></section></main>
 </body>
 </html>

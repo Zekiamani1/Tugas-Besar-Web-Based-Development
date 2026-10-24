@@ -1,25 +1,36 @@
 <!DOCTYPE html>
-<html>
-<head><title>Migrations</title></head>
+<html lang="id">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Migrations · Database Manager</title><link rel="stylesheet" href="/static/app.css"></head>
 <body>
-	<h1>Migration History (DB #{{.DBID}})</h1>
-	<a href="/dashboard">Back to Dashboard</a> |
-	<a href="/databases/{{.DBID}}/schemas">Back to Schemas</a>
+	<main class="page"><header class="page-header"><div><p class="eyebrow">Database #{{.DBID}}</p><h1>Migrations</h1></div><nav><a href="/dashboard">Dashboard</a><a href="/databases/{{.DBID}}/schemas">Schemas</a></nav></header>
 
-	<h2>Create Draft</h2>
+	{{if .CanEdit}}
+	<section class="card"><h2>Create Draft</h2>
 	<form method="POST" action="/databases/{{.DBID}}/migrations">
-		<textarea name="sql_query" placeholder="SQL Query"></textarea>
+		<label for="draft-sql">SQL Query</label><textarea id="draft-sql" name="sql_query" placeholder="CREATE TABLE ..." required>{{.DraftSQL}}</textarea>
+		{{if .Error}}<p class="message error" role="alert">{{.Error}}</p>{{end}}
 		<button type="submit">Create Draft</button>
-	</form>
+	</form></section>
 
-	<h2>History</h2>
-	<ul>
+	<section class="card"><h2>Drafts</h2><ul class="item-list">
+	{{range .Drafts}}
+		<li><a href="/databases/{{$.DBID}}/migrations/{{.ID}}">Draft #{{.ID}}</a> <span class="status" data-status="{{.Status}}">{{.Status}}</span><pre class="sql-preview">{{.SQLQuery}}</pre></li>
+	{{else}}
+		<li class="empty-state">No drafts yet.</li>
+	{{end}}
+	</ul></section>
+	{{end}}
+
+	<section class="card"><h2>History</h2><ul class="item-list">
 	{{range .Migrations}}
 		<li>
-			<a href="/databases/{{$.DBID}}/migrations/{{.ID}}">Migration #{{.ID}}</a>
-			| Version: {{.Version}} | Status: {{.Status}} | Executed by: {{.ExecutedBy}} | Executed at: {{.ExecutedAt}} | Query: {{.SQLQuery}}
+			<a href="/databases/{{$.DBID}}/migrations/{{.ID}}">Migration #{{.ID}}</a> <span class="status" data-status="{{.Status}}">{{.Status}}</span><br>
+			<span class="muted">Version: {{.Version}} · Executed by: {{.ExecutedBy}} · Executed at: {{.ExecutedAt}}</span>
+			<pre class="sql-preview">{{.SQLQuery}}</pre>
 		</li>
+	{{else}}
+		<li class="empty-state">Belum ada riwayat migration.</li>
 	{{end}}
-	</ul>
+	</ul></section></main>
 </body>
 </html>

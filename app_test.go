@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,6 +24,8 @@ type mockAccessControlService struct {
 	loginFunc             func(ctx context.Context, username, password string) (string, error)
 	logoutFunc            func(ctx context.Context, sessionID string) error
 	validateSessionFunc   func(ctx context.Context, sessionID string) (int, error)
+	isAdminFunc           func(ctx context.Context, userID int) (bool, error)
+	evaluateDBAccessFunc  func(ctx context.Context, userID, targetDBID int, requiredLevel string) error
 	createGroupFunc       func(ctx context.Context, groupName string) error
 	assignUserToGroupFunc func(ctx context.Context, userID, groupID int) error
 	setGroupDBAccessFunc  func(ctx context.Context, groupID, targetDBID int, accessLevel string) error
@@ -44,7 +47,15 @@ func (m *mockAccessControlService) ValidateSession(ctx context.Context, sessionI
 	if m.validateSessionFunc != nil {
 		return m.validateSessionFunc(ctx, sessionID)
 	}
-	return 0,nil
+	return 0, nil
+}
+
+func (m *mockAccessControlService) IsAdmin(ctx context.Context, userID int) (bool, error) {
+	return m.isAdminFunc(ctx, userID)
+}
+
+func (m *mockAccessControlService) EvaluateDBAccess(ctx context.Context, userID, targetDBID int, requiredLevel string) error {
+	return m.evaluateDBAccessFunc(ctx, userID, targetDBID, requiredLevel)
 }
 
 func (m *mockAccessControlService) CreateGroup(ctx context.Context, groupName string) error {
@@ -107,6 +118,7 @@ type mockMigrationService struct {
 	createDraftFunc        func(ctx context.Context, targetDBID int, sqlQuery string) (int, error)
 	updateDraftFunc        func(ctx context.Context, targetDBID, migrationID int, sqlQuery string) error
 	getMigrationDetailFunc func(ctx context.Context, targetDBID, migrationID int) (*models.MigrationRecord, error)
+	getDraftsFunc          func(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error)
 	getLinearHistoryFunc   func(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error)
 	executeMigrationFunc   func(ctx context.Context, targetDBID, migrationID int, token string) (*models.MigrationRecord, error)
 }
@@ -121,6 +133,10 @@ func (m *mockMigrationService) UpdateDraft(ctx context.Context, targetDBID, migr
 
 func (m *mockMigrationService) GetMigrationDetail(ctx context.Context, targetDBID, migrationID int) (*models.MigrationRecord, error) {
 	return m.getMigrationDetailFunc(ctx, targetDBID, migrationID)
+}
+
+func (m *mockMigrationService) GetDrafts(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error) {
+	return m.getDraftsFunc(ctx, targetDBID)
 }
 
 func (m *mockMigrationService) GetLinearHistory(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error) {
@@ -183,6 +199,28 @@ func TestAccessControlHandlers(t *testing.T) {
 		cookies := rec.Result().Cookies()
 		if len(cookies) == 0 || cookies[0].Name != "session_id" || cookies[0].Value != "sess-123" {
 			t.Errorf("expected session_id cookie sess-123, got %+v", cookies)
+		}
+	})
+
+	t.Run("LoginFromBrowserForm", func(t *testing.T) {
+		mockAC.loginFunc = func(ctx context.Context, username, password string) (string, error) {
+			if username != "admin" || password != "secret" {
+				t.Errorf("unexpected form credentials: (%s, %s)", username, password)
+			}
+			return "form-session", nil
+		}
+		body := url.Values{"username": {"admin"}, "password": {"secret"}}.Encode()
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/dashboard" {
+			t.Errorf("expected login redirect to dashboard, got code=%d location=%s", rec.Code, rec.Header().Get("Location"))
+		}
+		cookies := rec.Result().Cookies()
+		if len(cookies) == 0 || cookies[0].Name != "session_id" || cookies[0].Value != "form-session" {
+			t.Errorf("expected session cookie from browser form, got %+v", cookies)
 		}
 	})
 
@@ -288,9 +326,62 @@ func TestAccessControlHandlers(t *testing.T) {
 	})
 }
 
+func TestBrowserEntryAndFeedback(t *testing.T) {
+	ac := &mockAccessControlService{}
+	app := NewApp(ac, nil, nil)
+
+	t.Run("root redirects to login without session", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
+			t.Fatalf("root redirect: status=%d location=%q", rec.Code, rec.Header().Get("Location"))
+		}
+	})
+
+	t.Run("root redirects to dashboard with session", func(t *testing.T) {
+		ac.validateSessionFunc = func(_ context.Context, token string) (int, error) {
+			if token != "valid-session" {
+				t.Errorf("unexpected token %q", token)
+			}
+			return 7, nil
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "valid-session"})
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/dashboard" {
+			t.Fatalf("root redirect: status=%d location=%q", rec.Code, rec.Header().Get("Location"))
+		}
+	})
+
+	t.Run("login error stays on form without showing password", func(t *testing.T) {
+		ac.loginFunc = func(context.Context, string, string) (string, error) {
+			return "", errors.New("invalid credentials")
+		}
+		form := url.Values{"username": {"alice"}, "password": {"very-secret-password"}}
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if rec.Code != http.StatusUnauthorized || !strings.Contains(body, `role="alert"`) || !strings.Contains(body, `value="alice"`) || strings.Contains(body, "very-secret-password") {
+			t.Fatalf("login feedback: status=%d body=%s", rec.Code, body)
+		}
+	})
+
+	t.Run("stylesheet is served", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/app.css", nil))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), "text/css") || !strings.Contains(rec.Body.String(), ".card") {
+			t.Fatalf("stylesheet: status=%d type=%q", rec.Code, rec.Header().Get("Content-Type"))
+		}
+	})
+}
+
 func TestDBManagementHandlers(t *testing.T) {
+	mockAC := &mockAccessControlService{}
 	mockDBM := &mockDBManagementService{}
-	app := NewApp(nil, mockDBM, nil)
+	app := NewApp(mockAC, mockDBM, nil)
 
 	t.Run("RegisterTargetDB", func(t *testing.T) {
 		mockDBM.registerTargetDBFunc = func(ctx context.Context, info models.TargetDBInfo) (int, error) {
@@ -318,30 +409,52 @@ func TestDBManagementHandlers(t *testing.T) {
 	})
 
 	t.Run("Dashboard", func(t *testing.T) {
+		mockAC.validateSessionFunc = func(_ context.Context, sessionID string) (int, error) {
+			if sessionID != "viewer-session" {
+				t.Errorf("unexpected dashboard session: %q", sessionID)
+			}
+			return 7, nil
+		}
+		mockAC.isAdminFunc = func(_ context.Context, userID int) (bool, error) {
+			if userID != 7 {
+				t.Errorf("unexpected dashboard user: %d", userID)
+			}
+			return false, nil
+		}
+		mockAC.evaluateDBAccessFunc = func(_ context.Context, userID, dbID int, level string) error {
+			if userID != 7 || level != accesscontrol.AccessLevelViewOnly {
+				t.Errorf("unexpected access check: user=%d level=%s", userID, level)
+			}
+			if dbID == 1 {
+				return nil
+			}
+			return accesscontrol.ErrDBAccessDenied
+		}
 		mockDBM.listDatabasesFunc = func(ctx context.Context) ([]models.TargetDBInfo, error) {
 			return []models.TargetDBInfo{
 				{
-					ID:       1,
-					Name:     "production_pg",
-					DBType:   "postgres",
-					Host:     "localhost",
-					Port:     5432,
-					User:     "postgres",
-					DBName:   "prod_db",
+					ID:     1,
+					Name:   "production_pg",
+					DBType: "postgres",
+					Host:   "localhost",
+					Port:   5432,
+					User:   "postgres",
+					DBName: "prod_db",
 				},
 				{
-					ID:       2,
-					Name:     "analytics_pg",
-					DBType:   "postgres",
-					Host:     "localhost",
-					Port:     5432,
-					User:     "postgres",
-					DBName:   "analytics_db",
+					ID:     2,
+					Name:   "analytics_pg",
+					DBType: "postgres",
+					Host:   "localhost",
+					Port:   5432,
+					User:   "postgres",
+					DBName: "analytics_db",
 				},
 			}, nil
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "viewer-session"})
 		rec := httptest.NewRecorder()
 		app.handleDashboard(rec, req)
 
@@ -352,8 +465,31 @@ func TestDBManagementHandlers(t *testing.T) {
 		if !strings.Contains(body, "production_pg") || !strings.Contains(body, "/databases/1/schemas") || !strings.Contains(body, "/databases/1/migrations") {
 			t.Errorf("expected production_pg, /databases/1/schemas, and /databases/1/migrations, got:\n%s", body)
 		}
-		if !strings.Contains(body, "analytics_pg") || !strings.Contains(body, "/databases/2/schemas") || !strings.Contains(body, "/databases/2/migrations") {
-			t.Errorf("expected analytics_pg, /databases/2/schemas, and /databases/2/migrations, got:\n%s", body)
+		if strings.Contains(body, "analytics_pg") || strings.Contains(body, "/databases/2/") || strings.Contains(body, "/admin") {
+			t.Errorf("dashboard exposed inaccessible database or admin link: %s", body)
+		}
+	})
+
+	t.Run("AdminDashboardWithoutDatabaseGrant", func(t *testing.T) {
+		mockAC.isAdminFunc = func(_ context.Context, userID int) (bool, error) {
+			return userID == 7, nil
+		}
+		mockAC.evaluateDBAccessFunc = func(context.Context, int, int, string) error {
+			return accesscontrol.ErrDBAccessDenied
+		}
+		req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "viewer-session"})
+		rec := httptest.NewRecorder()
+		app.handleDashboard(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("admin dashboard: status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, `href="/admin"`) || !strings.Contains(body, "Belum ada database") {
+			t.Errorf("admin link or empty state missing: %s", body)
+		}
+		if strings.Contains(body, "production_pg") || strings.Contains(body, "analytics_pg") {
+			t.Errorf("platform admin was given database access without a group grant: %s", body)
 		}
 	})
 
@@ -474,16 +610,142 @@ func TestDBManagementHandlers(t *testing.T) {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 		body := rec.Body.String()
-		if !strings.Contains(body, `id`) || !strings.Contains(body, `1`) || !strings.Contains(body, `email`) || !strings.Contains(body, `alice@example.com`) {
+		if !strings.Contains(body, `<th scope="col">email</th>`) || !strings.Contains(body, `<th scope="col">id</th>`) || !strings.Contains(body, `<td>alice@example.com</td>`) {
 			t.Errorf("wrong table data, got:\n %s", body)
 		}
 	})
+}
+
+func TestAdminBrowserForms(t *testing.T) {
+	mockAC := &mockAccessControlService{}
+	mockDBM := &mockDBManagementService{}
+	app := NewApp(mockAC, mockDBM, nil)
+
+	mockAC.registerFunc = func(_ context.Context, username, password string) error {
+		if username != "alice" || password != "pass123" {
+			t.Errorf("unexpected registered user: %q / %q", username, password)
+		}
+		return nil
+	}
+	mockAC.createGroupFunc = func(_ context.Context, name string) error {
+		if name != "analysts" {
+			t.Errorf("unexpected group name: %q", name)
+		}
+		return nil
+	}
+	mockAC.assignUserToGroupFunc = func(_ context.Context, userID, groupID int) error {
+		if userID != 2 || groupID != 3 {
+			t.Errorf("unexpected group member: user=%d group=%d", userID, groupID)
+		}
+		return nil
+	}
+	mockAC.setGroupDBAccessFunc = func(_ context.Context, groupID, dbID int, level string) error {
+		if groupID != 3 || dbID != 1 || level != "VIEW_EDIT" {
+			t.Errorf("unexpected database access: group=%d db=%d level=%q", groupID, dbID, level)
+		}
+		return nil
+	}
+	mockDBM.registerTargetDBFunc = func(_ context.Context, info models.TargetDBInfo) (int, error) {
+		if info.Name != "production" || info.DBType != "postgres" || info.Host != "localhost" || info.Port != 5432 || info.User != "postgres" || info.Password != "secret" || info.DBName != "prod_db" {
+			t.Errorf("unexpected database registration: %+v", info)
+		}
+		return 1, nil
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		form    url.Values
+		handler http.HandlerFunc
+		message string
+	}{
+		{"register user", "/admin/users", url.Values{"username": {"alice"}, "password": {"pass123"}}, app.handleRegisterUser, "berhasil menambahkan alice"},
+		{"create group", "/admin/groups", url.Values{"group_name": {"analysts"}}, app.handleCreateGroup, "berhasil menambahkan group analysts"},
+		{"assign member", "/admin/groups/members", url.Values{"user_id": {"2"}, "group_id": {"3"}}, app.handleAssignUserToGroup, "berhasil memasukkan user_id 2"},
+		{"set access", "/admin/groups/permissions", url.Values{"group_id": {"3"}, "target_db_id": {"1"}, "access_level": {"VIEW_EDIT"}}, app.handleSetGroupDBAccess, "berhasil meng-set hak akses"},
+		{"register database", "/admin/databases", url.Values{"name": {"production"}, "db_type": {"postgres"}, "host": {"localhost"}, "port": {"5432"}, "user": {"postgres"}, "password": {"secret"}, "db_name": {"prod_db"}}, app.handleRegisterTargetDB, "DB ditambahkan dengan id 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			tt.handler(rec, req)
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tt.message) {
+				t.Fatalf("form response: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("invalid numeric field", func(t *testing.T) {
+		form := url.Values{"user_id": {"oops"}, "group_id": {"3"}}
+		req := httptest.NewRequest(http.MethodPost, "/admin/groups/members", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		app.handleAssignUserToGroup(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for invalid numeric field, got %d", rec.Code)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, `role="alert"`) || !strings.Contains(body, `value="3"`) || !strings.Contains(body, "ID pengguna dan grup") {
+			t.Errorf("expected inline error and preserved group ID, got %s", body)
+		}
+	})
+
+	t.Run("failed database form does not echo password", func(t *testing.T) {
+		mockDBM.registerTargetDBFunc = func(context.Context, models.TargetDBInfo) (int, error) {
+			return 0, errors.New("connection refused")
+		}
+		form := url.Values{"name": {"production"}, "db_type": {"postgres"}, "host": {"localhost"}, "port": {"5432"}, "user": {"postgres"}, "password": {"very-secret-password"}, "db_name": {"prod_db"}}
+		req := httptest.NewRequest(http.MethodPost, "/admin/databases", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		app.handleRegisterTargetDB(rec, req)
+		body := rec.Body.String()
+		if rec.Code != http.StatusInternalServerError || !strings.Contains(body, `role="alert"`) || !strings.Contains(body, `value="production"`) || strings.Contains(body, "very-secret-password") {
+			t.Fatalf("database form feedback: status=%d body=%s", rec.Code, body)
+		}
+	})
+}
+
+func TestMigrationFormErrorKeepsSQL(t *testing.T) {
+	ac := &mockAccessControlService{}
+	mig := &mockMigrationService{}
+	app := NewApp(ac, nil, mig)
+	ac.validateSessionFunc = func(context.Context, string) (int, error) { return 7, nil }
+	ac.evaluateDBAccessFunc = func(context.Context, int, int, string) error { return nil }
+	mig.createDraftFunc = func(context.Context, int, string) (int, error) { return 0, errors.New("database unavailable") }
+	mig.getLinearHistoryFunc = func(context.Context, int) ([]models.MigrationRecord, error) { return nil, nil }
+	mig.getDraftsFunc = func(context.Context, int) ([]models.MigrationRecord, error) { return nil, nil }
+
+	sql := "CREATE TABLE example (id INT);"
+	req := httptest.NewRequest(http.MethodPost, "/databases/1/migrations", strings.NewReader(url.Values{"sql_query": {sql}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "editor-session"})
+	req.SetPathValue("dbID", "1")
+	rec := httptest.NewRecorder()
+	app.handleCreateMigrationDraft(rec, req)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), sql) || !strings.Contains(rec.Body.String(), `role="alert"`) {
+		t.Fatalf("migration form feedback: status=%d body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestMigrationHandlers(t *testing.T) {
 	mockAC := &mockAccessControlService{}
 	mockMig := &mockMigrationService{}
 	app := NewApp(mockAC, nil, mockMig)
+	mockAC.validateSessionFunc = func(_ context.Context, sessionID string) (int, error) {
+		if sessionID != "viewer-session" {
+			t.Errorf("unexpected migration session: %q", sessionID)
+		}
+		return 7, nil
+	}
+	mockAC.evaluateDBAccessFunc = func(_ context.Context, userID, dbID int, level string) error {
+		if userID != 7 || dbID != 1 || level != accesscontrol.AccessLevelViewEdit {
+			t.Errorf("unexpected migration edit check: user=%d db=%d level=%s", userID, dbID, level)
+		}
+		return accesscontrol.ErrDBAccessDenied
+	}
 
 	t.Run("GetMigrationHistory", func(t *testing.T) {
 		mockMig.getLinearHistoryFunc = func(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error) {
@@ -497,6 +759,7 @@ func TestMigrationHandlers(t *testing.T) {
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/databases/1/migrations", nil)
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "viewer-session"})
 		req.SetPathValue("dbID", "1")
 		rec := httptest.NewRecorder()
 		app.handleGetMigrationHistory(rec, req)
@@ -507,6 +770,12 @@ func TestMigrationHandlers(t *testing.T) {
 		body := rec.Body.String()
 		if !strings.Contains(body, `CREATE TABLE users (id INT);`) || !strings.Contains(body, `APPLIED`) || !strings.Contains(body, `ALTER TABLE users ADD email TEXT;`) || !strings.Contains(body, `DRAFT`) {
 			t.Errorf("wrong migration history, got:\n %s", body)
+		}
+		if strings.Contains(body, "Create Draft") {
+			t.Errorf("view-only user should not see draft creation: %s", body)
+		}
+		if strings.Contains(body, "<h2>Drafts</h2>") {
+			t.Errorf("view-only user should not see draft list: %s", body)
 		}
 	})
 
@@ -526,6 +795,7 @@ func TestMigrationHandlers(t *testing.T) {
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/databases/1/migrations/2", nil)
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "viewer-session"})
 		req.SetPathValue("dbID", "1")
 		req.SetPathValue("migrationID", "2")
 		rec := httptest.NewRecorder()
@@ -540,6 +810,42 @@ func TestMigrationHandlers(t *testing.T) {
 		}
 		if strings.Contains(body, `name="token"`) {
 			t.Errorf("execute form must not ask for an execution token, got:\n%s", body)
+		}
+		if strings.Contains(body, "Edit Draft") || strings.Contains(body, "Execute Migration") {
+			t.Errorf("view-only user should not see migration actions: %s", body)
+		}
+	})
+
+	t.Run("MigrationEditorControls", func(t *testing.T) {
+		mockAC.evaluateDBAccessFunc = func(_ context.Context, userID, dbID int, level string) error {
+			if userID != 7 || dbID != 1 || level != accesscontrol.AccessLevelViewEdit {
+				t.Errorf("unexpected editor access check: user=%d db=%d level=%s", userID, dbID, level)
+			}
+			return nil
+		}
+		mockMig.getDraftsFunc = func(_ context.Context, targetDBID int) ([]models.MigrationRecord, error) {
+			if targetDBID != 1 {
+				t.Errorf("unexpected draft target: %d", targetDBID)
+			}
+			return []models.MigrationRecord{{ID: 2, TargetDBID: 1, SQLQuery: "ALTER TABLE users ADD email TEXT;", Status: "DRAFT"}}, nil
+		}
+		historyReq := httptest.NewRequest(http.MethodGet, "/databases/1/migrations", nil)
+		historyReq.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "viewer-session"})
+		historyReq.SetPathValue("dbID", "1")
+		historyRec := httptest.NewRecorder()
+		app.handleGetMigrationHistory(historyRec, historyReq)
+		if historyRec.Code != http.StatusOK || !strings.Contains(historyRec.Body.String(), "Create Draft") || !strings.Contains(historyRec.Body.String(), "Draft #2") {
+			t.Errorf("editor should see draft creation and existing drafts: status=%d body=%s", historyRec.Code, historyRec.Body.String())
+		}
+
+		detailReq := httptest.NewRequest(http.MethodGet, "/databases/1/migrations/2", nil)
+		detailReq.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "viewer-session"})
+		detailReq.SetPathValue("dbID", "1")
+		detailReq.SetPathValue("migrationID", "2")
+		detailRec := httptest.NewRecorder()
+		app.handleGetMigrationDetail(detailRec, detailReq)
+		if detailRec.Code != http.StatusOK || !strings.Contains(detailRec.Body.String(), "Edit Draft") || !strings.Contains(detailRec.Body.String(), "Execute Migration") {
+			t.Errorf("editor should see draft actions: status=%d body=%s", detailRec.Code, detailRec.Body.String())
 		}
 	})
 

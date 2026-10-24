@@ -1,20 +1,17 @@
 <!DOCTYPE html>
-<html>
-<head><title>Table Data</title></head>
+<html lang="id">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Table Data · Database Manager</title><link rel="stylesheet" href="/static/app.css"></head>
 <body>
-	<h1>Data: {{.Schema}}.{{.TableName}}</h1>
-	<nav>
-		<a href="/databases/{{.DBID}}/schemas/{{.Schema}}/tables/{{.TableName}}">Table Details</a> |
+	<main class="page"><header class="page-header"><div><p class="eyebrow">Table Data</p><h1>{{.Schema}}.{{.TableName}}</h1></div><nav>
+		<a href="/databases/{{.DBID}}/schemas/{{.Schema}}/tables/{{.TableName}}">Table Details</a>
 		<a href="/databases/{{.DBID}}/schemas/{{.Schema}}/tables">Back to Tables</a>
-	</nav>
-	<table border="1">
+	</nav></header>
+	<section class="card">
+	{{if .Rows}}<div class="table-wrap"><table><thead><tr>{{range .Columns}}<th scope="col">{{.}}</th>{{end}}</tr></thead><tbody>
 	{{range .Rows}}
-		<tr>
-		{{range $k, $v := .}}
-			<td>{{$k}}: {{$v}}</td>
-		{{end}}
-		</tr>
+		{{$row := .}}<tr>{{range $.Columns}}<td>{{index $row .}}</td>{{end}}</tr>
 	{{end}}
-	</table>
+	</tbody></table></div>{{else}}<p class="empty-state">Belum ada data pada tabel ini.</p>{{end}}
+	</section></main>
 </body>
 </html>

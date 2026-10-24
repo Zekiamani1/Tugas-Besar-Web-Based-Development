@@ -1,15 +1,14 @@
 <!DOCTYPE html>
-<html>
-<head><title>Schemas</title></head>
+<html lang="id">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Schemas · Database Manager</title><link rel="stylesheet" href="/static/app.css"></head>
 <body>
-	<h1>Schemas (DB #{{.DBID}})</h1>
-	<nav>
-		<a href="/dashboard">Dashboard</a>
-	</nav>
-	<ul>
+	<main class="page"><header class="page-header"><div><p class="eyebrow">Database #{{.DBID}}</p><h1>Schemas</h1></div><nav><a href="/dashboard">Dashboard</a><a href="/databases/{{.DBID}}/migrations">Migrations</a></nav></header>
+	<section class="card"><ul class="item-list">
 	{{range .Schemas}}
 		<li><a href="/databases/{{$.DBID}}/schemas/{{.}}/tables">{{.}}</a></li>
+	{{else}}
+		<li class="empty-state">Belum ada schema yang dapat ditampilkan.</li>
 	{{end}}
-	</ul>
+	</ul></section></main>
 </body>
 </html>

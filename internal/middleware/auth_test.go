@@ -53,6 +53,19 @@ func TestRequireAuthMissingCookie(t *testing.T) {
 	ac.AssertNotCalled(t, "ValidateSession", mock.Anything, mock.Anything)
 }
 
+func TestRequireAuthBrowserRedirectsToLogin(t *testing.T) {
+	ac := new(mockAuthService)
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	RequireAuth(ac, func(http.ResponseWriter, *http.Request) {
+		t.Fatal("unauthenticated browser reached handler")
+	}).ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusSeeOther, rec.Code)
+	assert.Equal(t, "/login?reason=session", rec.Header().Get("Location"))
+	ac.AssertNotCalled(t, "ValidateSession", mock.Anything, mock.Anything)
+}
+
 // Test session ID tidak valid.
 func TestRequireAuthInvalidSession(t *testing.T) {
 	ac := new(mockAuthService)

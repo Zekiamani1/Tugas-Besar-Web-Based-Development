@@ -1,12 +1,24 @@
 <!DOCTYPE html>
-<html>
-<head><title>Login</title></head>
-<body>
-	<h1>Login</h1>
-	<form method="POST" action="/login">
-		<input type="text" name="username" placeholder="Username">
-		<input type="password" name="password" placeholder="Password">
-		<button type="submit">Login</button>
-	</form>
+<html lang="id">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Login · Database Manager</title>
+	<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="auth-page">
+	<main class="auth-card">
+		<p class="eyebrow">Database Manager</p>
+		<h1>Masuk</h1>
+		<p class="muted">Gunakan akun yang diberikan administrator.</p>
+		{{if .Error}}<p class="message error" role="alert">{{.Error}}</p>{{end}}
+		<form method="POST" action="/login">
+			<label for="username">Username</label>
+			<input id="username" type="text" name="username" value="{{.Username}}" autocomplete="username" required autofocus>
+			<label for="password">Password</label>
+			<input id="password" type="password" name="password" autocomplete="current-password" required>
+			<button type="submit">Masuk</button>
+		</form>
+	</main>
 </body>
 </html>
