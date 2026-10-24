@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -31,6 +32,16 @@ type mockAccessControlService struct {
 	createGroupFunc       func(ctx context.Context, groupName string) error
 	assignUserToGroupFunc func(ctx context.Context, userID, groupID int) error
 	setGroupDBAccessFunc  func(ctx context.Context, groupID, targetDBID int, accessLevel string) error
+}
+
+const testCSRFToken = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+func addCSRFFormToken(req *http.Request) {
+	req.AddCookie(&http.Cookie{Name: middleware.CSRFTokenCookieName, Value: testCSRFToken})
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	_ = req.ParseForm()
+	req.PostForm.Set("_csrf", testCSRFToken)
+	req.Body = io.NopCloser(strings.NewReader(req.PostForm.Encode()))
 }
 
 func (m *mockAccessControlService) Register(ctx context.Context, username, password string) error {
@@ -227,7 +238,7 @@ func TestAccessControlHandlers(t *testing.T) {
 		}
 		body := url.Values{"username": {"admin"}, "password": {"secret"}}.Encode()
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		addCSRFFormToken(req)
 		rec := httptest.NewRecorder()
 		app.ServeHTTP(rec, req)
 
@@ -376,7 +387,7 @@ func TestBrowserEntryAndFeedback(t *testing.T) {
 		}
 		form := url.Values{"username": {"alice"}, "password": {"very-secret-password"}}
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		addCSRFFormToken(req)
 		rec := httptest.NewRecorder()
 		app.ServeHTTP(rec, req)
 		body := rec.Body.String()

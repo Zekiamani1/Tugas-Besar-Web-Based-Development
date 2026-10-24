@@ -13,6 +13,7 @@
 		<div class="card-grid">
 			<section class="card"><h2>Register User</h2>
 				<form method="POST" action="/admin/users">
+					<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 					<label for="user-name">Username</label><input id="user-name" name="username" value="{{.Values.Get "username"}}" autocomplete="off" required>
 					<label for="user-password">Password</label><input id="user-password" type="password" name="password" autocomplete="new-password" required>
 					{{if eq .ErrorForm "/admin/users"}}<p class="message error" role="alert">{{.Message}}</p>{{end}}
@@ -21,6 +22,7 @@
 			</section>
 			<section class="card"><h2>Create Group</h2>
 				<form method="POST" action="/admin/groups">
+					<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 					<label for="group-name">Group Name</label><input id="group-name" name="group_name" value="{{.Values.Get "group_name"}}" required>
 					{{if eq .ErrorForm "/admin/groups"}}<p class="message error" role="alert">{{.Message}}</p>{{end}}
 					<button type="submit">Create Group</button>
@@ -28,6 +30,7 @@
 			</section>
 			<section class="card"><h2>Assign User to Group</h2>
 				<form method="POST" action="/admin/groups/members">
+					<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 					<label for="member-user">User</label>
 					<select id="member-user" name="user_id" required>
 						<option value="" disabled {{if not (.Values.Get "user_id")}}selected{{end}}>Pilih user</option>
@@ -44,6 +47,7 @@
 			</section>
 			<section class="card"><h2>Set Group DB Access</h2>
 				<form method="POST" action="/admin/groups/permissions">
+					<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 					<label for="access-group">Group</label>
 					<select id="access-group" name="group_id" required>
 						<option value="" disabled {{if not (.Values.Get "group_id")}}selected{{end}}>Pilih group</option>
@@ -61,6 +65,7 @@
 			</section>
 			<section class="card card-wide"><h2>Register Target Database</h2>
 				<form method="POST" action="/admin/databases">
+					<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 					<div class="form-grid">
 						<div><label for="db-name">Name</label><input id="db-name" name="name" value="{{.Values.Get "name"}}" required></div>
 						<div><label for="db-type">DB Type</label><input id="db-type" name="db_type" value="{{.Values.Get "db_type"}}" placeholder="postgres" required></div>

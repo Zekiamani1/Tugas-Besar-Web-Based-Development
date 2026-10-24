@@ -11,12 +11,14 @@
 	{{if and .CanEdit (eq .Status "DRAFT")}}
 	<section class="card"><h2>Edit Draft</h2>
 	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/edit">
+		<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 		<label for="edit-sql">SQL Query</label><textarea id="edit-sql" name="sql_query" required>{{if .EditedSQL}}{{.EditedSQL}}{{else}}{{.SQLQuery}}{{end}}</textarea>
 		<button type="submit">Save Draft</button>
 	</form></section>
 
 	<section class="card"><h2>Execute Migration</h2><p class="muted">SQL di atas akan dijalankan pada database target. Pastikan isinya sudah benar.</p>
 	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/execute" onsubmit="return confirm('Jalankan migration ini? Pastikan SQL sudah benar.')">
+		<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 		<button class="button-danger" type="submit">Execute</button>
 	</form></section>
 	{{end}}

@@ -371,7 +371,7 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 			app,
 			http.MethodPost,
 			"/logout",
-			nil,
+			map[string]string{},
 			viewerCookie,
 		)
 		if rec.Code != http.StatusSeeOther {

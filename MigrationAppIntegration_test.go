@@ -109,7 +109,10 @@ func TestMigrationAppIntegration(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest(method, path, strings.NewReader(form))
 		if form != "" {
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			addCSRFFormToken(req)
+		}
+		if form == "" && method == http.MethodPost {
+			addCSRFFormToken(req)
 		}
 		if cookie != nil {
 			req.AddCookie(cookie)
