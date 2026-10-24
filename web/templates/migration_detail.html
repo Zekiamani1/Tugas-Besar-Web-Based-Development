@@ -11,7 +11,7 @@
 	{{if ne .Status "DRAFT"}}<p>ExecutedAt: {{.ExecutedAt}}</p>{{end}}
 	<pre>{{.SQLQuery}}</pre>
 
-	{{if eq .Status "DRAFT"}}
+	{{if and .CanEdit (eq .Status "DRAFT")}}
 	<h2>Edit Draft</h2>
 	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/edit">
 		<textarea name="sql_query" required>{{.SQLQuery}}</textarea>

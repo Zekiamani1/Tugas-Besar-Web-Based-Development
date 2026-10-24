@@ -65,6 +65,23 @@ func TestCreateAndUpdateDraft(t *testing.T) {
 	}
 }
 
+func TestGetDraftsFiltersByTargetAndStatus(t *testing.T) {
+	svc, mock := newMockService(t, nil)
+	if _, err := svc.GetDrafts(context.Background(), 0); !errors.Is(err, ErrInvalidMigration) {
+		t.Fatalf("invalid target: expected ErrInvalidMigration, got %v", err)
+	}
+	mock.ExpectQuery(`SELECT .*FROM "migration_records"`).
+		WithArgs(2, StatusDraft).
+		WillReturnRows(draftRow())
+	drafts, err := svc.GetDrafts(context.Background(), 2)
+	if err != nil || len(drafts) != 1 || drafts[0].ID != 7 || drafts[0].Status != StatusDraft {
+		t.Fatalf("unexpected drafts: %+v err=%v", drafts, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExecuteMigrationCommitsAndAssignsVersion(t *testing.T) {
 	target, targetMock, err := sqlmock.New()
 	if err != nil {

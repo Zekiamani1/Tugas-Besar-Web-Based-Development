@@ -4,7 +4,9 @@
 <body>
 	<h1>Dashboard</h1>
 	<nav>
+		{{if .IsAdmin}}
 		<a href="/admin">Admin Panel</a>
+		{{end}}
 		<form method="POST" action="/logout">
 			<button type="submit">Logout</button>
 		</form>
@@ -17,6 +19,8 @@
 			<strong><a href="/databases/{{.ID}}/schemas">{{.Name}}</a></strong> ({{.DBType}} - {{.Host}}:{{.Port}}/{{.DBName}})
 			| <a href="/databases/{{.ID}}/migrations">Migrations</a>
 		</li>
+	{{else}}
+		<li>No databases available for your account.</li>
 	{{end}}
 	</ul>
 </body>

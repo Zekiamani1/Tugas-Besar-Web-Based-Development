@@ -139,6 +139,12 @@ func TestMigrationAppIntegration(t *testing.T) {
 	if err != nil || migrationID <= 0 {
 		t.Fatalf("invalid draft redirect: %q", created.Header().Get("Location"))
 	}
+	if rec := request(http.MethodGet, basePath, "", editorCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), fmt.Sprintf("Draft #%d", migrationID)) {
+		t.Fatalf("editor cannot find the saved draft: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := request(http.MethodGet, basePath, "", viewerCookie); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), fmt.Sprintf("Draft #%d", migrationID)) {
+		t.Fatalf("viewer can see an editable draft: status=%d body=%s", rec.Code, rec.Body.String())
+	}
 
 	executePath := fmt.Sprintf("%s/%d/execute", basePath, migrationID)
 	if rec := request(http.MethodPost, executePath, "", viewerCookie); rec.Code != http.StatusForbidden {
@@ -161,6 +167,9 @@ func TestMigrationAppIntegration(t *testing.T) {
 	}
 	if record.Status != migration.StatusApplied || record.Version != 1 || record.ExecutedBy != strconv.Itoa(editor.ID) || record.ExecutedAt.IsZero() {
 		t.Fatalf("unexpected migration history: %+v", record)
+	}
+	if rec := request(http.MethodGet, basePath, "", editorCookie); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), fmt.Sprintf("Draft #%d", migrationID)) {
+		t.Fatalf("executed draft still appears in draft list: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if rec := request(http.MethodGet, basePath, "", viewerCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "APPLIED") {
 		t.Fatalf("viewer history: status=%d body=%s", rec.Code, rec.Body.String())
