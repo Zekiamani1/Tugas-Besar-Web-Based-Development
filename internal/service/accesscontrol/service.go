@@ -73,25 +73,25 @@ func seedAdmin(db *gorm.DB) {
 
 // fungsi tambahan buat cek apakah admint
 func (s *Service) IsAdmin(ctx context.Context, userID int) (bool, error) {
-    if userID <= 0 {
-        return false, errors.New("user id must be positive")
-    }
+	if userID <= 0 {
+		return false, errors.New("user id must be positive")
+	}
 
-    var user models.User
+	var user models.User
 
-    tx := s.db.WithContext(ctx).
-        Select("id", "is_admin").
-        First(&user, userID)
+	tx := s.db.WithContext(ctx).
+		Select("id", "is_admin").
+		First(&user, userID)
 
-    if errors.Is(tx.Error, gorm.ErrRecordNotFound) {
-        return false, nil
-    }
+	if errors.Is(tx.Error, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
 
-    if tx.Error != nil {
-        return false, fmt.Errorf("check platform admin: %w", tx.Error)
-    }
+	if tx.Error != nil {
+		return false, fmt.Errorf("check platform admin: %w", tx.Error)
+	}
 
-    return user.IsAdmin, nil
+	return user.IsAdmin, nil
 }
 
 func (s *Service) Register(ctx context.Context, username, password string) error {
@@ -118,6 +118,32 @@ func (s *Service) Register(ctx context.Context, username, password string) error
 	}
 
 	return nil
+}
+
+// ListUsers returns safe user details for admin pages, ordered by ID.
+func (s *Service) ListUsers(ctx context.Context) ([]models.UserSummary, error) {
+	var users []models.UserSummary
+	if err := s.db.WithContext(ctx).
+		Model(&models.User{}).
+		Select("id", "username", "is_admin").
+		Order("id ASC").
+		Find(&users).Error; err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	return users, nil
+}
+
+// ListGroups returns group IDs and names for admin pages, ordered by ID.
+func (s *Service) ListGroups(ctx context.Context) ([]models.GroupSummary, error) {
+	var groups []models.GroupSummary
+	if err := s.db.WithContext(ctx).
+		Model(&models.Group{}).
+		Select("id", "name").
+		Order("id ASC").
+		Find(&groups).Error; err != nil {
+		return nil, fmt.Errorf("list groups: %w", err)
+	}
+	return groups, nil
 }
 
 func (s *Service) Login(ctx context.Context, username, password string) (string, error) {

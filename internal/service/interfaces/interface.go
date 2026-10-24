@@ -12,6 +12,8 @@ type AccessControlService interface {
 	Login(ctx context.Context, username, password string) (string, error)
 	Logout(ctx context.Context, sessionID string) error
 	ValidateSession(ctx context.Context, sessionID string) (int, error)
+	ListUsers(ctx context.Context) ([]models.UserSummary, error)
+	ListGroups(ctx context.Context) ([]models.GroupSummary, error)
 	CreateGroup(ctx context.Context, groupName string) error
 	AssignUserToGroup(ctx context.Context, userID, groupID int) error
 	SetGroupDBAccess(ctx context.Context, groupID, targetDBID int, accessLevel string) error

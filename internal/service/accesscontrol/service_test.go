@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"wbd/internal/models"
 	"wbd/internal/service/interfaces"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -420,4 +421,92 @@ func TestRegisterReturnsInsertError(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("not all database expectations were met: %v", err)
 	}
+}
+
+func TestListUsersReturnsSafeUserDetailsInIDOrder(t *testing.T) {
+	service, mock := newMockService(t)
+	mock.ExpectQuery(`SELECT "id","username","is_admin" FROM "users" ORDER BY id ASC`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "is_admin"}).
+			AddRow(2, "alice", false).
+			AddRow(5, "admin", true))
+
+	users, err := service.ListUsers(context.Background())
+	if err != nil {
+		t.Fatalf("ListUsers returned error: %v", err)
+	}
+	if len(users) != 2 || users[0] != (models.UserSummary{ID: 2, Username: "alice", IsAdmin: false}) || users[1] != (models.UserSummary{ID: 5, Username: "admin", IsAdmin: true}) {
+		t.Fatalf("unexpected user summaries: %+v", users)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestListUsersReturnsEmptyList(t *testing.T) {
+	service, mock := newMockService(t)
+	mock.ExpectQuery(`SELECT "id","username","is_admin" FROM "users" ORDER BY id ASC`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "is_admin"}))
+
+	users, err := service.ListUsers(context.Background())
+	if err != nil {
+		t.Fatalf("ListUsers returned error: %v", err)
+	}
+	if len(users) != 0 {
+		t.Fatalf("expected no users, got %+v", users)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestListUsersReturnsDatabaseError(t *testing.T) {
+	service, mock := newMockService(t)
+	mock.ExpectQuery(`SELECT "id","username","is_admin" FROM "users" ORDER BY id ASC`).
+		WillReturnError(errors.New("database unavailable"))
+
+	users, err := service.ListUsers(context.Background())
+	if err == nil || users != nil {
+		t.Fatalf("expected list error and nil result, got users=%+v err=%v", users, err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestListGroupsReturnsDetailsInIDOrder(t *testing.T) {
+	service, mock := newMockService(t)
+	mock.ExpectQuery(`SELECT "id","name" FROM "groups" ORDER BY id ASC`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).
+			AddRow(1, "analysts").
+			AddRow(3, "developers"))
+
+	groups, err := service.ListGroups(context.Background())
+	if err != nil {
+		t.Fatalf("ListGroups returned error: %v", err)
+	}
+	if len(groups) != 2 || groups[0] != (models.GroupSummary{ID: 1, Name: "analysts"}) || groups[1] != (models.GroupSummary{ID: 3, Name: "developers"}) {
+		t.Fatalf("unexpected group summaries: %+v", groups)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestListGroupsReturnsEmptyList(t *testing.T) {
+	service, mock := newMockService(t)
+	mock.ExpectQuery(`SELECT "id","name" FROM "groups" ORDER BY id ASC`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}))
+
+	groups, err := service.ListGroups(context.Background())
+	if err != nil {
+		t.Fatalf("ListGroups returned error: %v", err)
+	}
+	if len(groups) != 0 {
+		t.Fatalf("expected no groups, got %+v", groups)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestListGroupsReturnsDatabaseError(t *testing.T) {
+	service, mock := newMockService(t)
+	mock.ExpectQuery(`SELECT "id","name" FROM "groups" ORDER BY id ASC`).
+		WillReturnError(errors.New("database unavailable"))
+
+	groups, err := service.ListGroups(context.Background())
+	if err == nil || groups != nil {
+		t.Fatalf("expected list error and nil result, got groups=%+v err=%v", groups, err)
+	}
+	assertExpectations(t, mock)
 }
