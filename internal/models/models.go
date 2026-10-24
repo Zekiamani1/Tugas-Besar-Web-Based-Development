@@ -61,13 +61,28 @@ type UserSummary struct {
 	IsAdmin  bool
 }
 
+// SessionValidation contains the authenticated user and the current session ID.
+type SessionValidation struct {
+	UserID           int
+	CurrentSessionID string
+	UsedGracePeriod  bool
+}
+
 type Session struct {
-	ID         int       `gorm:"primaryKey"`
-	UserID     int       `gorm:"not null;index"`
-	SessionID  string    `gorm:"uniqueIndex;not null"`
-	CreatedAt  time.Time `gorm:"not null"`
-	LastSeenAt time.Time `gorm:"not null"`
-	ExpiresAt  time.Time `gorm:"not null"`
+	ID            int       `gorm:"primaryKey"`
+	UserID        int       `gorm:"not null;index"`
+	SessionID     string    `gorm:"uniqueIndex;not null"`
+	CreatedAt     time.Time `gorm:"not null"`
+	LastSeenAt    time.Time `gorm:"not null"`
+	LastRotatedAt time.Time `gorm:"not null;default:CURRENT_TIMESTAMP"`
+	ExpiresAt     time.Time `gorm:"not null"`
+}
+
+// SessionAlias keeps each rotated identifier valid only for its grace period.
+type SessionAlias struct {
+	SessionID       string    `gorm:"primaryKey"`
+	SessionRecordID int       `gorm:"not null;index"`
+	ExpiresAt       time.Time `gorm:"not null;index"`
 }
 
 type Group struct {

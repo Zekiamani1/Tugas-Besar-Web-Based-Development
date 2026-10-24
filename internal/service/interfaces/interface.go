@@ -12,6 +12,7 @@ type AccessControlService interface {
 	Login(ctx context.Context, username, password string) (string, error)
 	Logout(ctx context.Context, sessionID string) error
 	ValidateSession(ctx context.Context, sessionID string) (int, error)
+	ValidateSessionWithRotation(ctx context.Context, sessionID string) (models.SessionValidation, error)
 	ListUsers(ctx context.Context) ([]models.UserSummary, error)
 	ListGroups(ctx context.Context) ([]models.GroupSummary, error)
 	CreateGroup(ctx context.Context, groupName string) error

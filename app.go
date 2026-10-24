@@ -21,6 +21,11 @@ type App struct {
 	interfaces.DBManagementService
 	interfaces.MigrationService
 	*http.ServeMux
+	sessionCookieSecure bool
+}
+
+type CookieConfig struct {
+	Secure bool
 }
 
 func (app *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -40,42 +45,64 @@ func NewApp(
 	dbmSvc interfaces.DBManagementService,
 	migSvc interfaces.MigrationService,
 ) *App {
+	return NewAppWithConfig(acSvc, dbmSvc, migSvc, CookieConfig{})
+}
+
+func NewAppWithConfig(
+	acSvc interfaces.AccessControlService,
+	dbmSvc interfaces.DBManagementService,
+	migSvc interfaces.MigrationService,
+	config CookieConfig,
+) *App {
 	app := &App{
 		AccessControlService: acSvc,
 		DBManagementService:  dbmSvc,
 		MigrationService:     migSvc,
 		ServeMux:             http.NewServeMux(),
+		sessionCookieSecure:  config.Secure,
 	}
 	app.HandleFunc("GET /{$}", app.handleHome)
 	app.HandleFunc("GET /static/app.css", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "web/static/app.css")
 	})
 	app.HandleFunc("GET /login", app.handleLoginPage)
-	app.Handle("GET /dashboard", middleware.RequireAuth(app, app.handleDashboard))
-	app.Handle("GET /admin", middleware.RequireAdminAccess(app, app.handleAdminPage))
-	app.Handle("GET /admin/users", middleware.RequireAdminAccess(app, app.handleAdminUsersPage))
-	app.Handle("GET /admin/groups", middleware.RequireAdminAccess(app, app.handleAdminGroupsPage))
-	app.Handle("GET /admin/databases", middleware.RequireAdminAccess(app, app.handleAdminDatabasesPage))
+	app.Handle("GET /dashboard", middleware.RequireAuth(app, app.handleDashboard, app.sessionCookieSecure))
+	app.Handle("GET /admin", middleware.RequireAdminAccess(app, app.handleAdminPage, app.sessionCookieSecure))
+	app.Handle("GET /admin/users", middleware.RequireAdminAccess(app, app.handleAdminUsersPage, app.sessionCookieSecure))
+	app.Handle("GET /admin/groups", middleware.RequireAdminAccess(app, app.handleAdminGroupsPage, app.sessionCookieSecure))
+	app.Handle("GET /admin/databases", middleware.RequireAdminAccess(app, app.handleAdminDatabasesPage, app.sessionCookieSecure))
 	app.HandleFunc("POST /login", app.handleLogin)
-	app.Handle("POST /logout", middleware.RequireAuth(app, app.handleLogout))
-	app.Handle("POST /admin/users", middleware.RequireAdminAccess(app, app.handleRegisterUser))
-	app.Handle("POST /admin/groups", middleware.RequireAdminAccess(app, app.handleCreateGroup))
-	app.Handle("POST /admin/groups/members", middleware.RequireAdminAccess(app, app.handleAssignUserToGroup))
-	app.Handle("POST /admin/groups/permissions", middleware.RequireAdminAccess(app, app.handleSetGroupDBAccess))
-	app.Handle("POST /admin/databases", middleware.RequireAdminAccess(app, app.handleRegisterTargetDB))
-	app.Handle("GET /databases/{dbID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleDatabaseRedirect))
-	app.Handle("GET /databases/{dbID}/schemas", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetSchemas))
-	app.Handle("GET /databases/{dbID}/schemas/{schema}/tables", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetTables))
-	app.Handle("GET /databases/{dbID}/schemas/{schema}/tables/{table}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetTableDetails))
-	app.Handle("GET /databases/{dbID}/schemas/{schema}/tables/{table}/data", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetTableData))
-	app.Handle("GET /databases/{dbID}/migrations", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationHistory))
-	app.Handle("GET /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationDetail))
-	app.Handle("POST /databases/{dbID}/migrations", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleCreateMigrationDraft))
-	app.Handle("PUT /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft))
-	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/edit", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft))
-	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/execute", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleExecuteMigration))
+	app.Handle("POST /logout", middleware.RequireAuth(app, app.handleLogout, app.sessionCookieSecure))
+	app.Handle("POST /admin/users", middleware.RequireAdminAccess(app, app.handleRegisterUser, app.sessionCookieSecure))
+	app.Handle("POST /admin/groups", middleware.RequireAdminAccess(app, app.handleCreateGroup, app.sessionCookieSecure))
+	app.Handle("POST /admin/groups/members", middleware.RequireAdminAccess(app, app.handleAssignUserToGroup, app.sessionCookieSecure))
+	app.Handle("POST /admin/groups/permissions", middleware.RequireAdminAccess(app, app.handleSetGroupDBAccess, app.sessionCookieSecure))
+	app.Handle("POST /admin/databases", middleware.RequireAdminAccess(app, app.handleRegisterTargetDB, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleDatabaseRedirect, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/schemas", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetSchemas, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/schemas/{schema}/tables", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetTables, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/schemas/{schema}/tables/{table}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetTableDetails, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/schemas/{schema}/tables/{table}/data", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetTableData, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/migrations", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationHistory, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationDetail, app.sessionCookieSecure))
+	app.Handle("POST /databases/{dbID}/migrations", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleCreateMigrationDraft, app.sessionCookieSecure))
+	app.Handle("PUT /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft, app.sessionCookieSecure))
+	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/edit", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft, app.sessionCookieSecure))
+	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/execute", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleExecuteMigration, app.sessionCookieSecure))
 
 	return app
+}
+
+func (app *App) setSessionCookie(w http.ResponseWriter, sessionID string, maxAge int) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     middleware.SessionCookieName,
+		Value:    sessionID,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   app.sessionCookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 func (app *App) handleHome(w http.ResponseWriter, r *http.Request) {
@@ -349,13 +376,7 @@ func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     "session_id",
-		Value:    sessionID,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	app.setSessionCookie(w, sessionID, 0)
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
 
@@ -374,13 +395,7 @@ func (app *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     "session_id",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		SameSite: http.SameSiteLaxMode,
-	})
+	app.setSessionCookie(w, "", -1)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 

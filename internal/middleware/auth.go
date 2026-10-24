@@ -30,7 +30,7 @@ func rejectUnauthenticated(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 
-func RequireAuth(ac interfaces.AccessControlService, next http.HandlerFunc) http.Handler {
+func RequireAuth(ac interfaces.AccessControlService, next http.HandlerFunc, secureCookie ...bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		//validate session using access control's validatesession
 
@@ -40,7 +40,7 @@ func RequireAuth(ac interfaces.AccessControlService, next http.HandlerFunc) http
 			return
 		}
 
-		userID, err := ac.ValidateSession(r.Context(), cookie.Value)
+		validation, err := ac.ValidateSessionWithRotation(r.Context(), cookie.Value)
 		if errors.Is(err, accesscontrol.ErrInvalidSession) {
 			rejectUnauthenticated(w, r)
 			return
@@ -49,12 +49,23 @@ func RequireAuth(ac interfaces.AccessControlService, next http.HandlerFunc) http
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
-		if userID <= 0 {
+		if validation.UserID <= 0 {
 			rejectUnauthenticated(w, r)
 			return
 		}
+		if validation.CurrentSessionID != "" && validation.CurrentSessionID != cookie.Value {
+			secure := len(secureCookie) > 0 && secureCookie[0]
+			http.SetCookie(w, &http.Cookie{
+				Name:     SessionCookieName,
+				Value:    validation.CurrentSessionID,
+				Path:     "/",
+				HttpOnly: true,
+				Secure:   secure,
+				SameSite: http.SameSiteLaxMode,
+			})
+		}
 
-		ctx := context.WithValue(r.Context(), userIDContextKey, userID)
+		ctx := context.WithValue(r.Context(), userIDContextKey, validation.UserID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
+	"wbd/internal/models"
 	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/interfaces"
 )
@@ -30,6 +31,17 @@ func (m *mockAuthzService) ValidateSession(
 ) (int, error) {
 	args := m.Called(ctx, sessionID)
 	return args.Int(0), args.Error(1)
+}
+
+func (m *mockAuthzService) ValidateSessionWithRotation(
+	ctx context.Context,
+	sessionID string,
+) (models.SessionValidation, error) {
+	args := m.Called(ctx, sessionID)
+	if validation, ok := args.Get(0).(models.SessionValidation); ok {
+		return validation, args.Error(1)
+	}
+	return models.SessionValidation{}, args.Error(1)
 }
 
 // Mock Platform Admin
@@ -114,10 +126,10 @@ func TestRequireAdminAccess(t *testing.T) {
 			// RequireAuth  melakukan validasi session
 			if tt.sessionID != "" {
 				ac.On(
-					"ValidateSession",
+					"ValidateSessionWithRotation",
 					mock.Anything,
 					tt.sessionID,
-				).Return(tt.userID, tt.sessionErr).Once()
+				).Return(models.SessionValidation{UserID: tt.userID, CurrentSessionID: tt.sessionID}, tt.sessionErr).Once()
 			}
 
 			// Hanya session valid yang boleh sampai ke IsAdmin
@@ -294,10 +306,10 @@ func TestRequireDBAccess(t *testing.T) {
 
 			if tt.sessionID != "" {
 				ac.On(
-					"ValidateSession",
+					"ValidateSessionWithRotation",
 					mock.Anything,
 					tt.sessionID,
-				).Return(tt.userID, tt.sessionErr).Once()
+				).Return(models.SessionValidation{UserID: tt.userID, CurrentSessionID: tt.sessionID}, tt.sessionErr).Once()
 			}
 
 			if tt.checkAccess {

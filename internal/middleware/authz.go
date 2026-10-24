@@ -9,7 +9,7 @@ import (
 	"wbd/internal/service/interfaces"
 )
 
-func RequireAdminAccess(ac interfaces.AccessControlService, next http.HandlerFunc) http.Handler {
+func RequireAdminAccess(ac interfaces.AccessControlService, next http.HandlerFunc, secureCookie ...bool) http.Handler {
 	return RequireAuth(ac, func(w http.ResponseWriter, r *http.Request) {
 		//check admin flag from session
 		userID, ok := userIDFromContext(r.Context())
@@ -30,10 +30,10 @@ func RequireAdminAccess(ac interfaces.AccessControlService, next http.HandlerFun
 		}
 		next.ServeHTTP(w, r)
 
-	})
+	}, secureCookie...)
 }
 
-func RequireDBAccess(ac interfaces.AccessControlService, requiredLevel string, next http.HandlerFunc) http.Handler {
+func RequireDBAccess(ac interfaces.AccessControlService, requiredLevel string, next http.HandlerFunc, secureCookie ...bool) http.Handler {
 	return RequireAuth(ac, func(w http.ResponseWriter, r *http.Request) {
 		//check db access level using access control's evaluatedbaccess
 		userID, ok := userIDFromContext(r.Context())
@@ -62,5 +62,5 @@ func RequireDBAccess(ac interfaces.AccessControlService, requiredLevel string, n
 			return
 		}
 		next.ServeHTTP(w, r)
-	})
+	}, secureCookie...)
 }

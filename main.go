@@ -1,11 +1,12 @@
 package main
 
 import (
-	"fmt"
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,10 @@ func main() {
 	sessionConfig, err := loadSessionConfig()
 	if err != nil {
 		log.Fatalf("invalid session configuration: %v", err)
+	}
+	cookieConfig, err := loadCookieConfig()
+	if err != nil {
+		log.Fatalf("invalid cookie configuration: %v", err)
 	}
 
 	dsn := os.Getenv("DATABASE_URL")
@@ -44,7 +49,7 @@ func main() {
 		log.Fatalf("failed to initialize migration history: %v", err)
 	}
 
-	app := NewApp(acSvc, dbmSvc, migSvc)
+	app := NewAppWithConfig(acSvc, dbmSvc, migSvc, cookieConfig)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -67,11 +72,36 @@ func loadSessionConfig() (accesscontrol.SessionConfig, error) {
 	if err != nil {
 		return accesscontrol.SessionConfig{}, err
 	}
+	rotationInterval, err := parsePositiveDurationEnv("SESSION_ROTATION_INTERVAL")
+	if err != nil {
+		return accesscontrol.SessionConfig{}, err
+	}
+	gracePeriod, err := parsePositiveDurationEnv("SESSION_ROTATION_GRACE_PERIOD")
+	if err != nil {
+		return accesscontrol.SessionConfig{}, err
+	}
+	if gracePeriod >= rotationInterval {
+		return accesscontrol.SessionConfig{}, fmt.Errorf("SESSION_ROTATION_GRACE_PERIOD must be shorter than SESSION_ROTATION_INTERVAL")
+	}
 
 	return accesscontrol.SessionConfig{
-		AbsoluteTTL: absoluteTTL,
-		IdleTimeout: idleTimeout,
+		AbsoluteTTL:      absoluteTTL,
+		IdleTimeout:      idleTimeout,
+		RotationInterval: rotationInterval,
+		GracePeriod:      gracePeriod,
 	}, nil
+}
+
+func loadCookieConfig() (CookieConfig, error) {
+	value := strings.TrimSpace(os.Getenv("SESSION_COOKIE_SECURE"))
+	if value == "" {
+		return CookieConfig{}, fmt.Errorf("SESSION_COOKIE_SECURE must be set to true or false")
+	}
+	secure, err := strconv.ParseBool(value)
+	if err != nil {
+		return CookieConfig{}, fmt.Errorf("SESSION_COOKIE_SECURE must be true or false: %w", err)
+	}
+	return CookieConfig{Secure: secure}, nil
 }
 
 func parsePositiveDurationEnv(name string) (time.Duration, error) {

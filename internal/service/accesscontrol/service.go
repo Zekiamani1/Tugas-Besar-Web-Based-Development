@@ -17,8 +17,10 @@ import (
 )
 
 type SessionConfig struct {
-	AbsoluteTTL time.Duration
-	IdleTimeout time.Duration
+	AbsoluteTTL      time.Duration
+	IdleTimeout      time.Duration
+	RotationInterval time.Duration
+	GracePeriod      time.Duration
 }
 
 type Service struct {
@@ -32,12 +34,12 @@ const (
 )
 
 func NewService(db *gorm.DB, sessionConfig SessionConfig) *Service {
-	db.AutoMigrate(&models.User{}, &models.Session{}, &models.Group{}, &models.UserGroup{}, &models.GroupDBAccess{})
-	seedAdmin(db)
+	db.AutoMigrate(&models.User{}, &models.Session{}, &models.SessionAlias{}, &models.Group{}, &models.UserGroup{}, &models.GroupDBAccess{})
+	seedAdmin(db, sessionConfig)
 	return &Service{db: db, sessionConfig: sessionConfig}
 }
 
-func seedAdmin(db *gorm.DB) {
+func seedAdmin(db *gorm.DB, sessionConfig SessionConfig) {
 	username := strings.TrimSpace(os.Getenv("ADMIN_USERNAME"))
 	if username == "" {
 		username = strings.TrimSpace(os.Getenv("INITIAL_ADMIN_USERNAME"))
@@ -53,7 +55,18 @@ func seedAdmin(db *gorm.DB) {
 	var existing models.User
 	if err := db.Where("username = ?", username).First(&existing).Error; err == nil {
 		if !existing.IsAdmin {
-			db.Model(&models.User{}).Where("id = ?", existing.ID).Update("is_admin", true)
+			_ = db.Transaction(func(tx *gorm.DB) error {
+				result := tx.Model(&models.User{}).
+					Where("id = ? AND is_admin = ?", existing.ID, false).
+					Update("is_admin", true)
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected > 0 {
+					return rotateUserSessions(tx, []int{existing.ID}, time.Now().UTC(), sessionConfig.GracePeriod)
+				}
+				return nil
+			})
 		}
 		return
 	}
@@ -171,19 +184,19 @@ func (s *Service) Login(ctx context.Context, username, password string) (string,
 		return "", errors.New("username atau password salah")
 	}
 
-	randomBytes := make([]byte, 32)
-	if _, err := rand.Read(randomBytes); err != nil {
+	sessionID, err := newSessionID()
+	if err != nil {
 		return "", fmt.Errorf("generate session ID: %w", err)
 	}
-	sessionID := base64.RawURLEncoding.EncodeToString(randomBytes)
 
 	now := time.Now().UTC()
 	session := models.Session{
-		UserID:     user.ID,
-		SessionID:  sessionID,
-		CreatedAt:  now,
-		LastSeenAt: now,
-		ExpiresAt:  now.Add(s.sessionConfig.AbsoluteTTL),
+		UserID:        user.ID,
+		SessionID:     sessionID,
+		CreatedAt:     now,
+		LastSeenAt:    now,
+		LastRotatedAt: now,
+		ExpiresAt:     now.Add(s.sessionConfig.AbsoluteTTL),
 	}
 
 	tx = s.db.WithContext(ctx).Create(&session)
@@ -198,70 +211,207 @@ func (s *Service) Logout(ctx context.Context, sessionID string) error {
 	if sessionID == "" {
 		return nil
 	}
-
-	tx := s.db.WithContext(ctx).
-		Where("session_id = ?", sessionID).
-		Delete(&models.Session{})
-	if tx.Error != nil {
-		return fmt.Errorf("revoke session: %w", tx.Error)
-	}
-	return nil
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var session models.Session
+		err := tx.Where("session_id = ?", sessionID).First(&session).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			var alias models.SessionAlias
+			err = tx.Where("session_id = ? AND expires_at > ?", sessionID, time.Now().UTC()).First(&alias).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("find session alias for logout: %w", err)
+			}
+			err = tx.First(&session, alias.SessionRecordID).Error
+		}
+		if err != nil {
+			return fmt.Errorf("find session for logout: %w", err)
+		}
+		if err := tx.Where("session_record_id = ?", session.ID).Delete(&models.SessionAlias{}).Error; err != nil {
+			return fmt.Errorf("delete session aliases: %w", err)
+		}
+		if err := tx.Delete(&session).Error; err != nil {
+			return fmt.Errorf("revoke session: %w", err)
+		}
+		return nil
+	})
 }
 
 var ErrInvalidSession = errors.New("invalid or expired session")
 
-func (s *Service) ValidateSession(ctx context.Context, sessionID string) (int, error) { //nambah nge return userid supaya tau session yang di cek itu punya siapa
+func (s *Service) ValidateSession(ctx context.Context, sessionID string) (int, error) {
+	validation, err := s.validateSession(ctx, sessionID, false)
+	if err != nil {
+		return 0, err
+	}
+	return validation.UserID, nil
+}
+
+func (s *Service) ValidateSessionWithRotation(ctx context.Context, sessionID string) (models.SessionValidation, error) {
+	return s.validateSession(ctx, sessionID, true)
+}
+
+func (s *Service) validateSession(ctx context.Context, sessionID string, rotate bool) (models.SessionValidation, error) {
 	if sessionID == "" {
-		return 0, ErrInvalidSession
-	}
-
-	var session models.Session
-	tx := s.db.WithContext(ctx).
-		Where("session_id = ?", sessionID).
-		First(&session)
-	if errors.Is(tx.Error, gorm.ErrRecordNotFound) {
-		return 0, ErrInvalidSession
-	}
-	if tx.Error != nil {
-		return 0, fmt.Errorf("find session: %w", tx.Error)
-	}
-	var user models.User
-
-	if err := s.db.WithContext(ctx).
-		Select("id").
-		First(&user, session.UserID).Error; err != nil {
-
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return 0, ErrInvalidSession
-		}
-
-		return 0, fmt.Errorf("find session owner: %w", err)
+		return models.SessionValidation{}, ErrInvalidSession
 	}
 
 	now := time.Now().UTC()
-
-	idleExpired := now.Sub(session.LastSeenAt) >= s.sessionConfig.IdleTimeout
-
-	absoluteExpired := !now.Before(session.ExpiresAt)
-
-	if idleExpired || absoluteExpired {
-		if err := s.db.WithContext(ctx).Delete(&session).Error; err != nil {
-			return 0, fmt.Errorf("delete expired session: %w", err)
+	var validation models.SessionValidation
+	invalidated := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var session models.Session
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("session_id = ?", sessionID).
+			First(&session).Error
+		isCurrentID := err == nil
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			var alias models.SessionAlias
+			err = tx.Where("session_id = ? AND expires_at > ?", sessionID, now).First(&alias).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrInvalidSession
+			}
+			if err != nil {
+				return fmt.Errorf("find session alias: %w", err)
+			}
+			err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, alias.SessionRecordID).Error
+			isCurrentID = false
 		}
-		return 0, ErrInvalidSession
-	}
-	update := s.db.WithContext(ctx).
-		Model(&models.Session{}).
-		Where("id = ?", session.ID).
-		Update("last_seen_at", now)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrInvalidSession
+		}
+		if err != nil {
+			return fmt.Errorf("find session: %w", err)
+		}
 
-	if update.Error != nil {
-		return 0, fmt.Errorf("Update session activity: %w", update.Error)
+		var user models.User
+		if err := tx.Select("id").First(&user, session.UserID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrInvalidSession
+			}
+			return fmt.Errorf("find session owner: %w", err)
+		}
+
+		if now.Sub(session.LastSeenAt) >= s.sessionConfig.IdleTimeout || !now.Before(session.ExpiresAt) {
+			if err := tx.Where("session_record_id = ?", session.ID).Delete(&models.SessionAlias{}).Error; err != nil {
+				return fmt.Errorf("delete expired session aliases: %w", err)
+			}
+			if err := tx.Delete(&session).Error; err != nil {
+				return fmt.Errorf("delete expired session: %w", err)
+			}
+			invalidated = true
+			return nil
+		}
+
+		updates := map[string]any{"last_seen_at": now}
+
+		if rotate && isCurrentID && s.sessionConfig.RotationInterval > 0 && now.Sub(session.LastRotatedAt) >= s.sessionConfig.RotationInterval {
+			newID, err := newSessionID()
+			if err != nil {
+				return fmt.Errorf("generate rotated session ID: %w", err)
+			}
+			graceExpiresAt := now.Add(s.sessionConfig.GracePeriod)
+			if graceExpiresAt.After(session.ExpiresAt) {
+				graceExpiresAt = session.ExpiresAt
+			}
+			if now.Before(graceExpiresAt) {
+				alias := models.SessionAlias{SessionID: session.SessionID, SessionRecordID: session.ID, ExpiresAt: graceExpiresAt}
+				if err := tx.Create(&alias).Error; err != nil {
+					return fmt.Errorf("save previous session identifier: %w", err)
+				}
+			}
+			updates["session_id"] = newID
+			updates["last_rotated_at"] = now
+			session.SessionID = newID
+		}
+
+		update := tx.Model(&models.Session{}).Where("id = ?", session.ID).Updates(updates)
+		if update.Error != nil {
+			return fmt.Errorf("update session activity: %w", update.Error)
+		}
+		if update.RowsAffected == 0 {
+			return ErrInvalidSession
+		}
+		validation = models.SessionValidation{
+			UserID:           session.UserID,
+			CurrentSessionID: session.SessionID,
+			UsedGracePeriod:  !isCurrentID,
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrInvalidSession) {
+			return models.SessionValidation{}, ErrInvalidSession
+		}
+		return models.SessionValidation{}, err
 	}
-	if update.RowsAffected == 0 {
-		return 0, ErrInvalidSession
+	if invalidated {
+		return models.SessionValidation{}, ErrInvalidSession
 	}
-	return session.UserID, nil
+	return validation, nil
+}
+
+func newSessionID() (string, error) {
+	randomBytes := make([]byte, 32)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(randomBytes), nil
+}
+
+func rotateUserSessions(tx *gorm.DB, userIDs []int, now time.Time, gracePeriod time.Duration) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	var sessions []models.Session
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("user_id IN ?", userIDs).Find(&sessions).Error; err != nil {
+		return fmt.Errorf("find affected sessions: %w", err)
+	}
+	for _, session := range sessions {
+		newID, err := newSessionID()
+		if err != nil {
+			return fmt.Errorf("generate rotated session ID: %w", err)
+		}
+		graceExpiresAt := now.Add(gracePeriod)
+		if graceExpiresAt.After(session.ExpiresAt) {
+			graceExpiresAt = session.ExpiresAt
+		}
+		if now.Before(graceExpiresAt) {
+			alias := models.SessionAlias{SessionID: session.SessionID, SessionRecordID: session.ID, ExpiresAt: graceExpiresAt}
+			if err := tx.Create(&alias).Error; err != nil {
+				return fmt.Errorf("save previous session identifier: %w", err)
+			}
+		}
+		if err := tx.Model(&models.Session{}).Where("id = ?", session.ID).Updates(map[string]any{
+			"session_id":      newID,
+			"last_rotated_at": now,
+		}).Error; err != nil {
+			return fmt.Errorf("rotate session for user %d: %w", session.UserID, err)
+		}
+	}
+	return nil
+}
+
+func revokeUserSessions(tx *gorm.DB, userIDs []int) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	var sessionIDs []int
+	if err := tx.Model(&models.Session{}).Where("user_id IN ?", userIDs).Pluck("id", &sessionIDs).Error; err != nil {
+		return fmt.Errorf("find sessions to revoke: %w", err)
+	}
+	if len(sessionIDs) == 0 {
+		return nil
+	}
+	if err := tx.Where("session_record_id IN ?", sessionIDs).Delete(&models.SessionAlias{}).Error; err != nil {
+		return fmt.Errorf("delete revoked session aliases: %w", err)
+	}
+	if err := tx.Where("id IN ?", sessionIDs).Delete(&models.Session{}).Error; err != nil {
+		return fmt.Errorf("revoke user sessions: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) CreateGroup(ctx context.Context, groupName string) error {
@@ -314,9 +464,20 @@ func (s *Service) AssignUserToGroup(ctx context.Context, userID, groupID int) er
 			GroupID: groupID,
 		}
 
-		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).
-			Create(&membership).Error; err != nil {
-			return fmt.Errorf("assign user to group: %w", err)
+		membershipResult := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&membership)
+		if membershipResult.Error != nil {
+			return fmt.Errorf("assign user to group: %w", membershipResult.Error)
+		}
+		if membershipResult.RowsAffected > 0 {
+			var permissionCount int64
+			if err := tx.Model(&models.GroupDBAccess{}).Where("group_id = ?", groupID).Count(&permissionCount).Error; err != nil {
+				return fmt.Errorf("count group database permissions: %w", err)
+			}
+			if permissionCount > 0 {
+				if err := rotateUserSessions(tx, []int{userID}, time.Now().UTC(), s.sessionConfig.GracePeriod); err != nil {
+					return err
+				}
+			}
 		}
 
 		return nil
@@ -364,6 +525,17 @@ func (s *Service) SetGroupDBAccess(ctx context.Context, groupID, targetDBID int,
 			return fmt.Errorf("find targetDB: %w", err)
 		}
 
+		var existingAccess models.GroupDBAccess
+		accessErr := tx.Where("group_id = ? AND target_db_id = ?", groupID, targetDBID).
+			First(&existingAccess).Error
+		if accessErr != nil && !errors.Is(accessErr, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("find existing group database access: %w", accessErr)
+		}
+		privilegeIncreased := errors.Is(accessErr, gorm.ErrRecordNotFound) ||
+			(existingAccess.AccessLevel == AccessLevelViewOnly && accessLevel == AccessLevelViewEdit)
+		privilegeDecreased := accessErr == nil &&
+			existingAccess.AccessLevel == AccessLevelViewEdit && accessLevel == AccessLevelViewOnly
+
 		grantacc := models.GroupDBAccess{
 			GroupID:     groupID,
 			TargetDBID:  targetDBID,
@@ -379,6 +551,19 @@ func (s *Service) SetGroupDBAccess(ctx context.Context, groupID, targetDBID int,
 			DoUpdates: clause.AssignmentColumns([]string{"access_level"}),
 		}).Create(&grantacc).Error; err != nil {
 			return fmt.Errorf("save group db acces %w", err)
+		}
+		if privilegeIncreased || privilegeDecreased {
+			var userIDs []int
+			if err := tx.Model(&models.UserGroup{}).Where("group_id = ?", groupID).Pluck("user_id", &userIDs).Error; err != nil {
+				return fmt.Errorf("find group members affected by permission change: %w", err)
+			}
+			if privilegeIncreased {
+				if err := rotateUserSessions(tx, userIDs, time.Now().UTC(), s.sessionConfig.GracePeriod); err != nil {
+					return err
+				}
+			} else if err := revokeUserSessions(tx, userIDs); err != nil {
+				return err
+			}
 		}
 		return nil
 
