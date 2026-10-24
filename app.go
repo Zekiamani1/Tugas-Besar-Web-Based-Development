@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"mime"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"wbd/internal/middleware"
 	"wbd/internal/models"
+	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/interfaces"
 )
 
@@ -485,14 +487,21 @@ func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid migrationID", http.StatusBadRequest)
 		return
 	}
-	var req struct {
-		Token string `json:"token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+	cookie, err := r.Cookie(middleware.SessionCookieName)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if _, err := app.ExecuteMigration(r.Context(), dbID, migrationID, req.Token); err != nil {
+	userID, err := app.ValidateSession(r.Context(), cookie.Value)
+	if errors.Is(err, accesscontrol.ErrInvalidSession) || (err == nil && userID <= 0) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if _, err := app.ExecuteMigration(r.Context(), dbID, migrationID, strconv.Itoa(userID)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

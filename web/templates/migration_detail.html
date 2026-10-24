@@ -20,7 +20,6 @@
 
 	<h2>Execute Migration</h2>
 	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/execute">
-		<input type="text" name="token" placeholder="Execution Token">
 		<button type="submit">Execute</button>
 	</form>
 	{{end}}

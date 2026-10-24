@@ -96,6 +96,61 @@ func TestExecuteMigrationCommitsAndAssignsVersion(t *testing.T) {
 	}
 }
 
+func TestExecuteMigrationReportsUncertainHistoryAfterTargetCommit(t *testing.T) {
+	target, targetMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, metaMock := newMockService(t, target)
+	metaMock.ExpectBegin()
+	metaMock.ExpectExec(`SELECT pg_advisory_xact_lock`).WillReturnResult(sqlmock.NewResult(0, 1))
+	metaMock.ExpectQuery(`SELECT .*FROM "migration_records"`).WillReturnRows(draftRow())
+	metaMock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\)`).WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(0))
+	targetMock.ExpectBegin()
+	targetMock.ExpectExec(`CREATE TABLE demo`).WillReturnResult(sqlmock.NewResult(0, 0))
+	targetMock.ExpectCommit()
+	metaMock.ExpectExec(`UPDATE "migration_records"`).WillReturnError(errors.New("history write failed"))
+	metaMock.ExpectRollback()
+
+	record, err := svc.ExecuteMigration(context.Background(), 2, 7, "alice")
+	if record != nil || !errors.Is(err, ErrHistoryUpdateUncertain) {
+		t.Fatalf("expected uncertain history after target commit, got record=%+v err=%v", record, err)
+	}
+	if err := metaMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if err := targetMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExecuteMigrationDoesNotRecordFailedOnUncertainTargetCommit(t *testing.T) {
+	target, targetMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, metaMock := newMockService(t, target)
+	metaMock.ExpectBegin()
+	metaMock.ExpectExec(`SELECT pg_advisory_xact_lock`).WillReturnResult(sqlmock.NewResult(0, 1))
+	metaMock.ExpectQuery(`SELECT .*FROM "migration_records"`).WillReturnRows(draftRow())
+	metaMock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\)`).WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(0))
+	targetMock.ExpectBegin()
+	targetMock.ExpectExec(`CREATE TABLE demo`).WillReturnResult(sqlmock.NewResult(0, 0))
+	targetMock.ExpectCommit().WillReturnError(errors.New("commit response lost"))
+	metaMock.ExpectRollback()
+
+	record, err := svc.ExecuteMigration(context.Background(), 2, 7, "alice")
+	if record != nil || !errors.Is(err, ErrTargetCommitUncertain) {
+		t.Fatalf("expected uncertain target commit, got record=%+v err=%v", record, err)
+	}
+	if err := metaMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if err := targetMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExecuteMigrationRollsBackAndRecordsFailure(t *testing.T) {
 	target, targetMock, err := sqlmock.New()
 	if err != nil {
