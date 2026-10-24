@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -39,6 +40,9 @@ func main() {
 	dbmSvc := dbmanagement.NewService(internalDB)
 	defer dbmSvc.CloseAllTargetConnections()
 	migSvc := migration.NewService(internalDB, dbmSvc)
+	if err := migSvc.Initialize(context.Background()); err != nil {
+		log.Fatalf("failed to initialize migration history: %v", err)
+	}
 
 	app := NewApp(acSvc, dbmSvc, migSvc)
 

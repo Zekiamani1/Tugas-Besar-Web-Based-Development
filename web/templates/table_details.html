@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head><title>Table Details</title></head>
+<body>
+	<h1>{{.Metadata.Schema}}.{{.Metadata.TableName}}</h1>
+	<nav>
+		<a href="/databases/{{.DBID}}/schemas/{{.Metadata.Schema}}/tables">Back to Tables</a> |
+		<a href="/databases/{{.DBID}}/schemas/{{.Metadata.Schema}}/tables/{{.Metadata.TableName}}/data">View Table Data</a>
+	</nav>
+	<h2>Columns</h2>
+	<ul>
+	{{range .Metadata.Columns}}
+		<li>{{.Name}} ({{.DataType}}) Nullable: {{.IsNullable}}</li>
+	{{end}}
+	</ul>
+	<h2>Constraints</h2>
+	<ul>
+	{{range .Metadata.Constraints}}
+		<li>{{.Name}} ({{.Type}})</li>
+	{{end}}
+	</ul>
+	<h2>Indexes</h2>
+	<ul>
+	{{range .Metadata.Indexes}}
+		<li>{{.Name}} Unique: {{.IsUnique}}</li>
+	{{end}}
+	</ul>
+</body>
+</html>
