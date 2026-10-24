@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"wbd/internal/models"
 	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/interfaces"
 )
@@ -32,6 +33,17 @@ func (m *mockAuthService) ValidateSession(
 	return args.Int(0), args.Error(1)
 }
 
+func (m *mockAuthService) ValidateSessionWithRotation(
+	ctx context.Context,
+	sessionID string,
+) (models.SessionValidation, error) {
+	args := m.Called(ctx, sessionID)
+	if validation, ok := args.Get(0).(models.SessionValidation); ok {
+		return validation, args.Error(1)
+	}
+	return models.SessionValidation{}, args.Error(1)
+}
+
 // Test request tanpa session cookie
 func TestRequireAuthMissingCookie(t *testing.T) {
 	ac := new(mockAuthService)
@@ -50,7 +62,7 @@ func TestRequireAuthMissingCookie(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.False(t, nextCalled)
 
-	ac.AssertNotCalled(t, "ValidateSession", mock.Anything, mock.Anything)
+	ac.AssertNotCalled(t, "ValidateSessionWithRotation", mock.Anything, mock.Anything)
 }
 
 func TestRequireAuthBrowserRedirectsToLogin(t *testing.T) {
@@ -63,7 +75,7 @@ func TestRequireAuthBrowserRedirectsToLogin(t *testing.T) {
 	}).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusSeeOther, rec.Code)
 	assert.Equal(t, "/login?reason=session", rec.Header().Get("Location"))
-	ac.AssertNotCalled(t, "ValidateSession", mock.Anything, mock.Anything)
+	ac.AssertNotCalled(t, "ValidateSessionWithRotation", mock.Anything, mock.Anything)
 }
 
 // Test session ID tidak valid.
@@ -71,10 +83,10 @@ func TestRequireAuthInvalidSession(t *testing.T) {
 	ac := new(mockAuthService)
 
 	ac.On(
-		"ValidateSession",
+		"ValidateSessionWithRotation",
 		mock.Anything,
 		"invalid-token",
-	).Return(0, accesscontrol.ErrInvalidSession).Once()
+	).Return(models.SessionValidation{}, accesscontrol.ErrInvalidSession).Once()
 
 	nextCalled := false
 	next := func(w http.ResponseWriter, r *http.Request) {
@@ -106,10 +118,10 @@ func TestRequireAuthWrappedInvalidSession(t *testing.T) {
 	)
 
 	ac.On(
-		"ValidateSession",
+		"ValidateSessionWithRotation",
 		mock.Anything,
 		"expired-token",
-	).Return(0, wrappedErr).Once()
+	).Return(models.SessionValidation{}, wrappedErr).Once()
 
 	nextCalled := false
 	next := func(w http.ResponseWriter, r *http.Request) {
@@ -136,10 +148,10 @@ func TestRequireAuthServiceError(t *testing.T) {
 	ac := new(mockAuthService)
 
 	ac.On(
-		"ValidateSession",
+		"ValidateSessionWithRotation",
 		mock.Anything,
 		"valid-token",
-	).Return(0, errors.New("database unavailable")).Once()
+	).Return(models.SessionValidation{}, errors.New("database unavailable")).Once()
 
 	nextCalled := false
 	next := func(w http.ResponseWriter, r *http.Request) {
@@ -166,10 +178,10 @@ func TestRequireAuthInvalidUserID(t *testing.T) {
 	ac := new(mockAuthService)
 
 	ac.On(
-		"ValidateSession",
+		"ValidateSessionWithRotation",
 		mock.Anything,
 		"valid-token",
-	).Return(0, nil).Once()
+	).Return(models.SessionValidation{}, nil).Once()
 
 	nextCalled := false
 	next := func(w http.ResponseWriter, r *http.Request) {
@@ -196,10 +208,10 @@ func TestRequireAuthValidSession(t *testing.T) {
 	ac := new(mockAuthService)
 
 	ac.On(
-		"ValidateSession",
+		"ValidateSessionWithRotation",
 		mock.Anything,
 		"valid-token",
-	).Return(7, nil).Once()
+	).Return(models.SessionValidation{UserID: 7, CurrentSessionID: "valid-token"}, nil).Once()
 
 	nextCalled := false
 
@@ -226,6 +238,40 @@ func TestRequireAuthValidSession(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, nextCalled)
+	ac.AssertExpectations(t)
+}
+
+func TestRequireAuthRefreshesRotatedSessionCookie(t *testing.T) {
+	ac := new(mockAuthService)
+	ac.On(
+		"ValidateSessionWithRotation",
+		mock.Anything,
+		"previous-token",
+	).Return(models.SessionValidation{UserID: 7, CurrentSessionID: "current-token", UsedGracePeriod: true}, nil).Once()
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "previous-token"})
+	rec := httptest.NewRecorder()
+	RequireAuth(ac, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}, true).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var sessionCookie *http.Cookie
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == SessionCookieName {
+			sessionCookie = cookie
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected middleware to refresh session cookie")
+	}
+	if sessionCookie.Value != "current-token" || !sessionCookie.HttpOnly || !sessionCookie.Secure || sessionCookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("unexpected refreshed session cookie: %+v", sessionCookie)
+	}
 	ac.AssertExpectations(t)
 }
 

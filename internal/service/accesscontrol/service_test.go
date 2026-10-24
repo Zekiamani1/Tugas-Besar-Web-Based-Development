@@ -45,8 +45,10 @@ func newMockService(t *testing.T) (*Service, sqlmock.Sqlmock) {
 	return &Service{
 		db: db,
 		sessionConfig: SessionConfig{
-			AbsoluteTTL: time.Hour,
-			IdleTimeout: 15 * time.Minute,
+			AbsoluteTTL:      time.Hour,
+			IdleTimeout:      15 * time.Minute,
+			RotationInterval: 15 * time.Minute,
+			GracePeriod:      30 * time.Second,
 		},
 	}, mock
 }
@@ -163,7 +165,7 @@ func TestLoginCreatesSession(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "username", "password_hash", "is_admin"}).AddRow(7, "alice", string(hash), false))
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO "sessions"`).
-		WithArgs(7, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WithArgs(7, sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(4))
 	mock.ExpectCommit()
 
@@ -190,10 +192,20 @@ func TestLoginReturnsDatabaseError(t *testing.T) {
 func TestLogoutDeletesSession(t *testing.T) {
 	service, mock := newMockService(t)
 	mock.ExpectBegin()
-	mock.ExpectExec(`DELETE FROM "sessions" WHERE session_id = \$1`).
-		WithArgs("session-id").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT \* FROM "sessions" WHERE session_id = \$1 ORDER BY .* LIMIT \$2`).
+		WithArgs("old-session", 1).WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectQuery(`SELECT \* FROM "session_aliases" WHERE session_id = \$1 AND expires_at > \$2 ORDER BY .* LIMIT \$3`).
+		WithArgs("old-session", sqlmock.AnyArg(), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"session_id", "session_record_id", "expires_at"}).AddRow("old-session", 4, time.Now().Add(time.Minute)))
+	mock.ExpectQuery(`SELECT \* FROM "sessions" WHERE "sessions"\."id" = \$1 ORDER BY .* LIMIT \$2`).
+		WithArgs(4, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "session_id", "created_at", "last_seen_at", "last_rotated_at", "expires_at"}).
+		AddRow(4, 7, "current-session", time.Now().Add(-time.Hour), time.Now(), time.Now(), time.Now().Add(time.Hour)))
+	mock.ExpectExec(`DELETE FROM "session_aliases" WHERE session_record_id = \$1`).
+		WithArgs(4).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`DELETE FROM "sessions" WHERE "sessions"\."id" = \$1`).
+		WithArgs(4).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
-	if err := service.Logout(context.Background(), "session-id"); err != nil {
+	if err := service.Logout(context.Background(), "old-session"); err != nil {
 		t.Fatalf("Logout returned error: %v", err)
 	}
 	assertExpectations(t, mock)
@@ -207,8 +219,12 @@ func TestLogoutEmptySessionIsNoOp(t *testing.T) {
 
 func TestValidateSessionRejectsUnknownSession(t *testing.T) {
 	service, mock := newMockService(t)
-	mock.ExpectQuery(`SELECT .* FROM "sessions" WHERE session_id = \$1 ORDER BY .* LIMIT \$2`).
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "sessions" WHERE session_id = \$1 ORDER BY .* LIMIT \$2 FOR UPDATE`).
 		WithArgs("missing", 1).WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectQuery(`SELECT \* FROM "session_aliases" WHERE session_id = \$1 AND expires_at > \$2 ORDER BY .* LIMIT \$3`).
+		WithArgs("missing", sqlmock.AnyArg(), 1).WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectRollback()
 	if _, err := service.ValidateSession(context.Background(), "missing"); !errors.Is(err, ErrInvalidSession) {
 		t.Fatalf("expected ErrInvalidSession, got %v", err)
 	}
@@ -218,13 +234,13 @@ func TestValidateSessionRejectsUnknownSession(t *testing.T) {
 func TestValidateSessionReturnsUserAndRefreshesIdleTimestamp(t *testing.T) {
 	service, mock := newMockService(t)
 	now := time.Now()
-	mock.ExpectQuery(`SELECT .* FROM "sessions" WHERE session_id = \$1 ORDER BY .* LIMIT \$2`).
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "sessions" WHERE session_id = \$1 ORDER BY .* LIMIT \$2 FOR UPDATE`).
 		WithArgs("valid", 1).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "session_id", "created_at", "last_seen_at", "expires_at"}).
-			AddRow(4, 7, "valid", now.Add(-time.Hour), now.Add(-time.Minute), now.Add(time.Hour)))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "session_id", "created_at", "last_seen_at", "last_rotated_at", "expires_at"}).
+			AddRow(4, 7, "valid", now.Add(-time.Hour), now.Add(-time.Minute), now, now.Add(time.Hour)))
 	mock.ExpectQuery(`SELECT "id" FROM "users" WHERE "users"\."id" = \$1 ORDER BY .* LIMIT \$2`).
 		WithArgs(7, 1).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(7))
-	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE "sessions" SET "last_seen_at"=\$1 WHERE id = \$2`).
 		WithArgs(sqlmock.AnyArg(), 4).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -239,16 +255,94 @@ func TestValidateSessionReturnsUserAndRefreshesIdleTimestamp(t *testing.T) {
 	assertExpectations(t, mock)
 }
 
+func TestValidateSessionWithRotationRenewsIDWithoutChangingAbsoluteExpiration(t *testing.T) {
+	service, mock := newMockService(t)
+	service.sessionConfig.RotationInterval = time.Minute
+	now := time.Now().UTC()
+	expiresAt := now.Add(time.Hour)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "sessions" WHERE session_id = \$1 ORDER BY .* LIMIT \$2 FOR UPDATE`).
+		WithArgs("current-id", 1).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "session_id", "created_at", "last_seen_at", "last_rotated_at", "expires_at"}).
+			AddRow(4, 7, "current-id", now.Add(-time.Hour), now.Add(-time.Minute), now.Add(-2*time.Minute), expiresAt))
+	mock.ExpectQuery(`SELECT "id" FROM "users" WHERE "users"\."id" = \$1 ORDER BY .* LIMIT \$2`).
+		WithArgs(7, 1).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(7))
+	mock.ExpectExec(`INSERT INTO "session_aliases"`).
+		WithArgs("current-id", 4, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE "sessions" SET .* WHERE id = \$4`).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), 4).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	validation, err := service.ValidateSessionWithRotation(context.Background(), "current-id")
+	if err != nil {
+		t.Fatalf("ValidateSessionWithRotation returned error: %v", err)
+	}
+	if validation.UserID != 7 || validation.CurrentSessionID == "" || validation.CurrentSessionID == "current-id" {
+		t.Fatalf("expected a new session ID for user 7, got %+v", validation)
+	}
+	if len(validation.CurrentSessionID) != 43 {
+		t.Fatalf("rotated session ID has unexpected length: %d", len(validation.CurrentSessionID))
+	}
+	assertExpectations(t, mock)
+}
+
+func TestValidateSessionWithRotationAcceptsPreviousIDDuringGrace(t *testing.T) {
+	service, mock := newMockService(t)
+	now := time.Now().UTC()
+	graceExpiry := now.Add(time.Minute)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "sessions" WHERE session_id = \$1 ORDER BY .* LIMIT \$2 FOR UPDATE`).
+		WithArgs("previous-id", 1).WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectQuery(`SELECT \* FROM "session_aliases" WHERE session_id = \$1 AND expires_at > \$2 ORDER BY .* LIMIT \$3`).
+		WithArgs("previous-id", sqlmock.AnyArg(), 1).
+		WillReturnRows(sqlmock.NewRows([]string{"session_id", "session_record_id", "expires_at"}).AddRow("previous-id", 4, graceExpiry))
+	mock.ExpectQuery(`SELECT \* FROM "sessions" WHERE "sessions"\."id" = \$1 ORDER BY .* LIMIT \$2 FOR UPDATE`).
+		WithArgs(4, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "session_id", "created_at", "last_seen_at", "last_rotated_at", "expires_at"}).
+		AddRow(4, 7, "current-id", now.Add(-time.Hour), now.Add(-time.Minute), now, now.Add(time.Hour)))
+	mock.ExpectQuery(`SELECT "id" FROM "users" WHERE "users"\."id" = \$1 ORDER BY .* LIMIT \$2`).
+		WithArgs(7, 1).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(7))
+	mock.ExpectExec(`UPDATE "sessions" SET "last_seen_at"=\$1 WHERE id = \$2`).
+		WithArgs(sqlmock.AnyArg(), 4).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	validation, err := service.ValidateSessionWithRotation(context.Background(), "previous-id")
+	if err != nil {
+		t.Fatalf("previous ID should be accepted during grace: %v", err)
+	}
+	if validation.UserID != 7 || validation.CurrentSessionID != "current-id" || !validation.UsedGracePeriod {
+		t.Fatalf("expected current ID to be returned, got %+v", validation)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestValidateSessionWithRotationRejectsPreviousIDAfterGrace(t *testing.T) {
+	service, mock := newMockService(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "sessions" WHERE session_id = \$1 ORDER BY .* LIMIT \$2 FOR UPDATE`).
+		WithArgs("previous-id", 1).WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectQuery(`SELECT \* FROM "session_aliases" WHERE session_id = \$1 AND expires_at > \$2 ORDER BY .* LIMIT \$3`).
+		WithArgs("previous-id", sqlmock.AnyArg(), 1).WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectRollback()
+
+	if _, err := service.ValidateSessionWithRotation(context.Background(), "previous-id"); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("expected previous ID outside grace to be rejected, got %v", err)
+	}
+	assertExpectations(t, mock)
+}
+
 func TestValidateSessionRejectsExpiredAndDeletesIt(t *testing.T) {
 	service, mock := newMockService(t)
 	now := time.Now()
-	mock.ExpectQuery(`SELECT .* FROM "sessions" WHERE session_id = \$1 ORDER BY .* LIMIT \$2`).
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT \* FROM "sessions" WHERE session_id = \$1 ORDER BY .* LIMIT \$2 FOR UPDATE`).
 		WithArgs("expired", 1).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "session_id", "created_at", "last_seen_at", "expires_at"}).
-			AddRow(4, 7, "expired", now.Add(-time.Hour), now.Add(-time.Minute), now.Add(-time.Second)))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "session_id", "created_at", "last_seen_at", "last_rotated_at", "expires_at"}).
+			AddRow(4, 7, "expired", now.Add(-time.Hour), now.Add(-time.Minute), now, now.Add(-time.Second)))
 	mock.ExpectQuery(`SELECT "id" FROM "users" WHERE "users"\."id" = \$1 ORDER BY .* LIMIT \$2`).
 		WithArgs(7, 1).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(7))
-	mock.ExpectBegin()
+	mock.ExpectExec(`DELETE FROM "session_aliases" WHERE session_record_id = \$1`).
+		WithArgs(4).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`DELETE FROM "sessions" WHERE "sessions"\."id" = \$1`).
 		WithArgs(4).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -295,7 +389,36 @@ func TestAssignUserToGroupCreatesMembership(t *testing.T) {
 		WithArgs(2, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(2, "team"))
 	mock.ExpectExec(`INSERT INTO "user_groups"`).
 		WithArgs(7, 2).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT count\(\*\) FROM "group_db_accesses" WHERE group_id = \$1`).
+		WithArgs(2).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectCommit()
+	if err := service.AssignUserToGroup(context.Background(), 7, 2); err != nil {
+		t.Fatalf("AssignUserToGroup returned error: %v", err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestAssignUserToPrivilegedGroupRotatesUserSessions(t *testing.T) {
+	service, mock := newMockService(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM "users" WHERE "users"\."id" = \$1 ORDER BY .* LIMIT \$2`).
+		WithArgs(7, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "username", "password_hash", "is_admin"}).AddRow(7, "alice", "hash", false))
+	mock.ExpectQuery(`SELECT .* FROM "groups" WHERE "groups"\."id" = \$1 ORDER BY .* LIMIT \$2`).
+		WithArgs(2, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(2, "editors"))
+	mock.ExpectExec(`INSERT INTO "user_groups"`).
+		WithArgs(7, 2).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT count\(\*\) FROM "group_db_accesses" WHERE group_id = \$1`).
+		WithArgs(2).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	now := time.Now().UTC()
+	mock.ExpectQuery(`SELECT \* FROM "sessions" WHERE user_id IN \(\$1\) FOR UPDATE`).
+		WithArgs(7).WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "session_id", "created_at", "last_seen_at", "last_rotated_at", "expires_at"}).
+		AddRow(4, 7, "member-session", now.Add(-time.Hour), now.Add(-time.Minute), now, now.Add(time.Hour)))
+	mock.ExpectExec(`INSERT INTO "session_aliases"`).
+		WithArgs("member-session", 4, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE "sessions" SET .* WHERE id = \$3`).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), 4).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
 	if err := service.AssignUserToGroup(context.Background(), 7, 2); err != nil {
 		t.Fatalf("AssignUserToGroup returned error: %v", err)
 	}
@@ -321,10 +444,71 @@ func TestSetGroupDBAccessStoresPermission(t *testing.T) {
 		WithArgs(2, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(2, "team"))
 	mock.ExpectQuery(`SELECT .* FROM "target_db_infos" WHERE "target_db_infos"\."id" = \$1 ORDER BY .* LIMIT \$2`).
 		WithArgs(9, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "db_type", "host", "port", "user", "password", "db_name"}).AddRow(9, "db", "postgres", "localhost", 5432, "u", "p", "db"))
+	mock.ExpectQuery(`SELECT \* FROM "group_db_accesses" WHERE group_id = \$1 AND target_db_id = \$2 ORDER BY .* LIMIT \$3`).
+		WithArgs(2, 9, 1).WillReturnError(gorm.ErrRecordNotFound)
 	mock.ExpectExec(`INSERT INTO "group_db_accesses"`).
 		WithArgs(2, 9, AccessLevelViewEdit).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT "user_id" FROM "user_groups" WHERE group_id = \$1`).
+		WithArgs(2).WillReturnRows(sqlmock.NewRows([]string{"user_id"}))
 	mock.ExpectCommit()
 	if err := service.SetGroupDBAccess(context.Background(), 2, 9, " view_edit "); err != nil {
+		t.Fatalf("SetGroupDBAccess returned error: %v", err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestSetGroupDBAccessPrivilegeIncreaseRotatesMemberSessions(t *testing.T) {
+	service, mock := newMockService(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM "groups" WHERE "groups"\."id" = \$1 ORDER BY .* LIMIT \$2`).
+		WithArgs(2, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(2, "team"))
+	mock.ExpectQuery(`SELECT .* FROM "target_db_infos" WHERE "target_db_infos"\."id" = \$1 ORDER BY .* LIMIT \$2`).
+		WithArgs(9, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "db_type", "host", "port", "user", "password", "db_name"}).AddRow(9, "db", "postgres", "localhost", 5432, "u", "p", "db"))
+	mock.ExpectQuery(`SELECT .* FROM "group_db_accesses" WHERE group_id = \$1 AND target_db_id = \$2 ORDER BY .* LIMIT \$3`).
+		WithArgs(2, 9, 1).WillReturnRows(sqlmock.NewRows([]string{"group_id", "target_db_id", "access_level"}).AddRow(2, 9, AccessLevelViewOnly))
+	mock.ExpectExec(`INSERT INTO "group_db_accesses"`).
+		WithArgs(2, 9, AccessLevelViewEdit).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT "user_id" FROM "user_groups" WHERE group_id = \$1`).
+		WithArgs(2).WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(7))
+	now := time.Now().UTC()
+	mock.ExpectQuery(`SELECT \* FROM "sessions" WHERE user_id IN \(\$1\) FOR UPDATE`).
+		WithArgs(7).WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "session_id", "created_at", "last_seen_at", "last_rotated_at", "expires_at"}).
+		AddRow(4, 7, "member-session", now.Add(-time.Hour), now.Add(-time.Minute), now, now.Add(time.Hour)))
+	mock.ExpectExec(`INSERT INTO "session_aliases"`).
+		WithArgs("member-session", 4, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE "sessions" SET .* WHERE id = \$3`).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), 4).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := service.SetGroupDBAccess(context.Background(), 2, 9, AccessLevelViewEdit); err != nil {
+		t.Fatalf("SetGroupDBAccess returned error: %v", err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestSetGroupDBAccessPrivilegeDecreaseRevokesMemberSessions(t *testing.T) {
+	service, mock := newMockService(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .* FROM "groups" WHERE "groups"\."id" = \$1 ORDER BY .* LIMIT \$2`).
+		WithArgs(2, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).AddRow(2, "team"))
+	mock.ExpectQuery(`SELECT .* FROM "target_db_infos" WHERE "target_db_infos"\."id" = \$1 ORDER BY .* LIMIT \$2`).
+		WithArgs(9, 1).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "db_type", "host", "port", "user", "password", "db_name"}).AddRow(9, "db", "postgres", "localhost", 5432, "u", "p", "db"))
+	mock.ExpectQuery(`SELECT .* FROM "group_db_accesses" WHERE group_id = \$1 AND target_db_id = \$2 ORDER BY .* LIMIT \$3`).
+		WithArgs(2, 9, 1).WillReturnRows(sqlmock.NewRows([]string{"group_id", "target_db_id", "access_level"}).AddRow(2, 9, AccessLevelViewEdit))
+	mock.ExpectExec(`INSERT INTO "group_db_accesses"`).
+		WithArgs(2, 9, AccessLevelViewOnly).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT "user_id" FROM "user_groups" WHERE group_id = \$1`).
+		WithArgs(2).WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(7))
+	mock.ExpectQuery(`SELECT "id" FROM "sessions" WHERE user_id IN \(\$1\)`).
+		WithArgs(7).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(4))
+	mock.ExpectExec(`DELETE FROM "session_aliases" WHERE session_record_id IN \(\$1\)`).
+		WithArgs(4).WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(`DELETE FROM "sessions" WHERE id IN \(\$1\)`).
+		WithArgs(4).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := service.SetGroupDBAccess(context.Background(), 2, 9, AccessLevelViewOnly); err != nil {
 		t.Fatalf("SetGroupDBAccess returned error: %v", err)
 	}
 	assertExpectations(t, mock)

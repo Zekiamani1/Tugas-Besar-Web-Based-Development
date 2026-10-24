@@ -21,17 +21,18 @@ import (
 
 type mockAccessControlService struct {
 	interfaces.AccessControlService
-	registerFunc          func(ctx context.Context, username, password string) error
-	loginFunc             func(ctx context.Context, username, password string) (string, error)
-	logoutFunc            func(ctx context.Context, sessionID string) error
-	validateSessionFunc   func(ctx context.Context, sessionID string) (int, error)
-	listUsersFunc         func(ctx context.Context) ([]models.UserSummary, error)
-	listGroupsFunc        func(ctx context.Context) ([]models.GroupSummary, error)
-	isAdminFunc           func(ctx context.Context, userID int) (bool, error)
-	evaluateDBAccessFunc  func(ctx context.Context, userID, targetDBID int, requiredLevel string) error
-	createGroupFunc       func(ctx context.Context, groupName string) error
-	assignUserToGroupFunc func(ctx context.Context, userID, groupID int) error
-	setGroupDBAccessFunc  func(ctx context.Context, groupID, targetDBID int, accessLevel string) error
+	registerFunc             func(ctx context.Context, username, password string) error
+	loginFunc                func(ctx context.Context, username, password string) (string, error)
+	logoutFunc               func(ctx context.Context, sessionID string) error
+	validateSessionFunc      func(ctx context.Context, sessionID string) (int, error)
+	validateWithRotationFunc func(ctx context.Context, sessionID string) (models.SessionValidation, error)
+	listUsersFunc            func(ctx context.Context) ([]models.UserSummary, error)
+	listGroupsFunc           func(ctx context.Context) ([]models.GroupSummary, error)
+	isAdminFunc              func(ctx context.Context, userID int) (bool, error)
+	evaluateDBAccessFunc     func(ctx context.Context, userID, targetDBID int, requiredLevel string) error
+	createGroupFunc          func(ctx context.Context, groupName string) error
+	assignUserToGroupFunc    func(ctx context.Context, userID, groupID int) error
+	setGroupDBAccessFunc     func(ctx context.Context, groupID, targetDBID int, accessLevel string) error
 }
 
 const testCSRFToken = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -61,6 +62,14 @@ func (m *mockAccessControlService) ValidateSession(ctx context.Context, sessionI
 		return m.validateSessionFunc(ctx, sessionID)
 	}
 	return 0, nil
+}
+
+func (m *mockAccessControlService) ValidateSessionWithRotation(ctx context.Context, sessionID string) (models.SessionValidation, error) {
+	if m.validateWithRotationFunc != nil {
+		return m.validateWithRotationFunc(ctx, sessionID)
+	}
+	userID, err := m.ValidateSession(ctx, sessionID)
+	return models.SessionValidation{UserID: userID, CurrentSessionID: sessionID}, err
 }
 
 func (m *mockAccessControlService) ListUsers(ctx context.Context) ([]models.UserSummary, error) {
@@ -226,6 +235,20 @@ func TestAccessControlHandlers(t *testing.T) {
 		cookies := rec.Result().Cookies()
 		if len(cookies) == 0 || cookies[0].Name != "session_id" || cookies[0].Value != "sess-123" {
 			t.Errorf("expected session_id cookie sess-123, got %+v", cookies)
+		} else if !cookies[0].HttpOnly || cookies[0].Secure || cookies[0].SameSite != http.SameSiteLaxMode {
+			t.Errorf("unexpected development session cookie attributes: %+v", cookies[0])
+		}
+	})
+
+	t.Run("LoginSecureCookieConfiguration", func(t *testing.T) {
+		mockAC.loginFunc = func(context.Context, string, string) (string, error) { return "secure-session", nil }
+		secureApp := NewAppWithConfig(mockAC, &mockDBManagementService{}, nil, CookieConfig{Secure: true})
+		req := newJSONRequest(t, http.MethodPost, "/login", map[string]string{"username": "admin", "password": "secret"})
+		rec := httptest.NewRecorder()
+		secureApp.handleLogin(rec, req)
+		cookies := rec.Result().Cookies()
+		if len(cookies) == 0 || !cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteLaxMode {
+			t.Fatalf("expected secure HttpOnly SameSite=Lax session cookie, got %+v", cookies)
 		}
 	})
 
@@ -269,6 +292,10 @@ func TestAccessControlHandlers(t *testing.T) {
 		}
 		if loc := rec.Header().Get("Location"); loc != "/login" {
 			t.Errorf("expected redirect to /login, got %s", loc)
+		}
+		cookies := rec.Result().Cookies()
+		if len(cookies) == 0 || cookies[0].Name != middleware.SessionCookieName || cookies[0].MaxAge != -1 || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteLaxMode {
+			t.Errorf("unexpected logout cookie attributes: %+v", cookies)
 		}
 	})
 

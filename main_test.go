@@ -37,6 +37,8 @@ func TestParsePositiveDurationEnv(t *testing.T) {
 func TestLoadSessionConfig(t *testing.T) {
 	t.Setenv("SESSION_ABSOLUTE_TTL", "12h")
 	t.Setenv("SESSION_IDLE_TIMEOUT", "30m")
+	t.Setenv("SESSION_ROTATION_INTERVAL", "15m")
+	t.Setenv("SESSION_ROTATION_GRACE_PERIOD", "30s")
 
 	got, err := loadSessionConfig()
 	if err != nil {
@@ -47,5 +49,27 @@ func TestLoadSessionConfig(t *testing.T) {
 	}
 	if got.IdleTimeout != 30*time.Minute {
 		t.Errorf("IdleTimeout = %v, want %v", got.IdleTimeout, 30*time.Minute)
+	}
+	if got.RotationInterval != 15*time.Minute {
+		t.Errorf("RotationInterval = %v, want %v", got.RotationInterval, 15*time.Minute)
+	}
+	if got.GracePeriod != 30*time.Second {
+		t.Errorf("GracePeriod = %v, want %v", got.GracePeriod, 30*time.Second)
+	}
+}
+
+func TestLoadCookieConfig(t *testing.T) {
+	t.Setenv("SESSION_COOKIE_SECURE", "true")
+	got, err := loadCookieConfig()
+	if err != nil {
+		t.Fatalf("loadCookieConfig() error = %v", err)
+	}
+	if !got.Secure {
+		t.Fatal("Secure = false, want true")
+	}
+
+	t.Setenv("SESSION_COOKIE_SECURE", "not-a-bool")
+	if _, err := loadCookieConfig(); err == nil {
+		t.Fatal("loadCookieConfig() accepted an invalid boolean")
 	}
 }

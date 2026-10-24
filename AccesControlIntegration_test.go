@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"wbd/internal/middleware"
 	"wbd/internal/models"
 	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/dbmanagement"
@@ -122,13 +124,15 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 	acService := accesscontrol.NewService(
 		internalDB,
 		accesscontrol.SessionConfig{
-			AbsoluteTTL: 2 * time.Hour,
-			IdleTimeout: 30 * time.Minute,
+			AbsoluteTTL:      2 * time.Hour,
+			IdleTimeout:      30 * time.Minute,
+			RotationInterval: 15 * time.Minute,
+			GracePeriod:      30 * time.Second,
 		},
 	)
 	migrationService := migration.NewService(internalDB, dbmService)
 
-	app := NewApp(acService, dbmService, migrationService)
+	app := NewAppWithConfig(acService, dbmService, migrationService, CookieConfig{Secure: true})
 
 	// Buat fixture admin melalui service, lalu  flag di database.
 	if err := acService.Register(ctx, "platform-admin", "admin-password"); err != nil {
@@ -179,6 +183,7 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 		}
 	})
 
+	var readers models.Group
 	t.Run("admin provisions target, user, group, and database permission", func(t *testing.T) {
 		// Register database target through App -> RequireAdminAccess -> handler -> DBManagementService -> internal PostgreSQL.
 		targetInfo := models.TargetDBInfo{
@@ -249,7 +254,6 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 				rec.Code, http.StatusOK, rec.Body.String())
 		}
 
-		var readers models.Group
 		if err := internalDB.
 			Where("name = ?", "readers").
 			First(&readers).Error; err != nil {
@@ -291,6 +295,9 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 	})
 
 	viewerCookie := loginThroughApp(t, app, "viewer", "viewer-password")
+	if !viewerCookie.Secure || !viewerCookie.HttpOnly || viewerCookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("login cookie has unexpected security attributes: %+v", viewerCookie)
+	}
 
 	t.Run("ordinary user cannot access Platform Admin page", func(t *testing.T) {
 		rec := sendAccessControlRequest(
@@ -314,6 +321,7 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 		t.Fatalf("find target for access requests: %v", err)
 	}
 	schemasPath := fmt.Sprintf("/databases/%d/schemas", storedTarget.ID)
+	var earlierRotatedCookie *http.Cookie
 
 	t.Run("missing session is rejected before database access", func(t *testing.T) {
 		rec := sendAccessControlRequest(
@@ -349,6 +357,71 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("periodic rotation preserves absolute expiration and refreshes cookie", func(t *testing.T) {
+		oldSessionID := viewerCookie.Value
+		earlierRotatedCookie = &http.Cookie{Name: middleware.SessionCookieName, Value: oldSessionID}
+		var before models.Session
+		if err := internalDB.Where("session_id = ?", oldSessionID).First(&before).Error; err != nil {
+			t.Fatalf("find viewer session before rotation: %v", err)
+		}
+		if err := internalDB.Model(&models.Session{}).
+			Where("id = ?", before.ID).
+			Update("last_rotated_at", time.Now().UTC().Add(-16*time.Minute)).Error; err != nil {
+			t.Fatalf("age session rotation timestamp: %v", err)
+		}
+
+		type requestResult struct {
+			status  int
+			cookies []*http.Cookie
+		}
+		results := make(chan requestResult, 2)
+		var requests sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			requests.Add(1)
+			go func() {
+				defer requests.Done()
+				req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+				req.AddCookie(viewerCookie)
+				rec := httptest.NewRecorder()
+				app.ServeHTTP(rec, req)
+				results <- requestResult{status: rec.Code, cookies: rec.Result().Cookies()}
+			}()
+		}
+		requests.Wait()
+		close(results)
+		var rotatedCookie *http.Cookie
+		for result := range results {
+			if result.status != http.StatusForbidden {
+				t.Fatalf("concurrent viewer request status = %d, want %d", result.status, http.StatusForbidden)
+			}
+			for _, cookie := range result.cookies {
+				if cookie.Name == middleware.SessionCookieName {
+					if rotatedCookie != nil && rotatedCookie.Value != cookie.Value {
+						t.Fatalf("concurrent responses returned different session IDs: %q and %q", rotatedCookie.Value, cookie.Value)
+					}
+					rotatedCookie = cookie
+				}
+			}
+		}
+		if rotatedCookie == nil || rotatedCookie.Value == oldSessionID {
+			t.Fatalf("concurrent rotation did not issue a new session cookie: %+v", rotatedCookie)
+		}
+		var after models.Session
+		if err := internalDB.Where("session_id = ?", rotatedCookie.Value).First(&after).Error; err != nil {
+			t.Fatalf("find periodically rotated session: %v", err)
+		}
+		if !after.ExpiresAt.Equal(before.ExpiresAt) {
+			t.Fatalf("absolute expiration changed from %v to %v", before.ExpiresAt, after.ExpiresAt)
+		}
+		viewerCookie = rotatedCookie
+
+		// A concurrent request that still carries the old ID receives the current cookie during grace.
+		rec := sendAccessControlRequest(t, app, http.MethodGet, schemasPath, nil, &http.Cookie{Name: middleware.SessionCookieName, Value: oldSessionID})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("old ID during grace status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+	})
+
 	t.Run("VIEW_ONLY user is denied migration write access", func(t *testing.T) {
 		path := fmt.Sprintf("/databases/%d/migrations", storedTarget.ID)
 		rec := sendAccessControlRequest(
@@ -365,7 +438,107 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("group permission increase rotates the member session", func(t *testing.T) {
+		oldSessionID := viewerCookie.Value
+		if earlierRotatedCookie != nil {
+			if err := internalDB.Model(&models.SessionAlias{}).
+				Where("session_id = ?", earlierRotatedCookie.Value).
+				Update("expires_at", time.Now().UTC().Add(time.Minute)).Error; err != nil {
+				t.Fatalf("extend earlier grace alias for overlapping-rotation scenario: %v", err)
+			}
+		}
+		var before models.Session
+		if err := internalDB.Where("session_id = ?", oldSessionID).First(&before).Error; err != nil {
+			t.Fatalf("find viewer session before privilege increase: %v", err)
+		}
+
+		rec := sendAccessControlRequest(
+			t,
+			app,
+			http.MethodPost,
+			"/admin/groups/permissions",
+			map[string]any{
+				"group_id":     readers.ID,
+				"target_db_id": storedTarget.ID,
+				"access_level": accesscontrol.AccessLevelViewEdit,
+			},
+			adminCookie,
+		)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("increase group permission status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+
+		var after models.Session
+		var currentAlias models.SessionAlias
+		if err := internalDB.Where("session_id = ?", oldSessionID).First(&currentAlias).Error; err != nil {
+			t.Fatalf("find grace-period alias: %v", err)
+		}
+		if err := internalDB.First(&after, currentAlias.SessionRecordID).Error; err != nil {
+			t.Fatalf("find rotated viewer session: %v", err)
+		}
+		if after.SessionID == oldSessionID {
+			t.Fatal("session ID did not change after privilege increase")
+		}
+		if !after.ExpiresAt.Equal(before.ExpiresAt) {
+			t.Fatalf("absolute expiration changed from %v to %v", before.ExpiresAt, after.ExpiresAt)
+		}
+
+		// Browser still presents the old ID: it remains accepted during grace and receives the current ID.
+		rec = sendAccessControlRequest(t, app, http.MethodGet, schemasPath, nil, viewerCookie)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("old session ID during grace status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		for _, cookie := range rec.Result().Cookies() {
+			if cookie.Name == middleware.SessionCookieName && cookie.Value == after.SessionID {
+				viewerCookie = cookie
+				break
+			}
+		}
+		if viewerCookie.Value != after.SessionID {
+			t.Fatal("response did not refresh the rotated session cookie")
+		}
+		if earlierRotatedCookie != nil {
+			rec = sendAccessControlRequest(t, app, http.MethodGet, schemasPath, nil, earlierRotatedCookie)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("earlier ID still within grace was rejected: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			foundCurrentCookie := false
+			for _, cookie := range rec.Result().Cookies() {
+				if cookie.Name == middleware.SessionCookieName && cookie.Value == after.SessionID {
+					foundCurrentCookie = true
+				}
+			}
+			if !foundCurrentCookie {
+				t.Fatal("response using an earlier grace ID did not refresh to the current session ID")
+			}
+		}
+	})
+
+	t.Run("permission downgrade revokes member sessions", func(t *testing.T) {
+		viewerCookie = loginThroughApp(t, app, "viewer", "viewer-password")
+		rec := sendAccessControlRequest(
+			t,
+			app,
+			http.MethodPost,
+			"/admin/groups/permissions",
+			map[string]any{
+				"group_id":     readers.ID,
+				"target_db_id": storedTarget.ID,
+				"access_level": accesscontrol.AccessLevelViewOnly,
+			},
+			adminCookie,
+		)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("downgrade group permission status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		rec = sendAccessControlRequest(t, app, http.MethodGet, schemasPath, nil, viewerCookie)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("request after permission downgrade status = %d, want %d; body: %s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+		}
+	})
+
 	t.Run("logout revokes session used by middleware", func(t *testing.T) {
+		viewerCookie = loginThroughApp(t, app, "viewer", "viewer-password")
 		rec := sendAccessControlRequest(
 			t,
 			app,

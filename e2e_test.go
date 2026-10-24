@@ -88,6 +88,9 @@ func setupe2e(t *testing.T) (string, *http.Client, *sql.DB, *sql.DB, string, int
 		fmt.Sprintf("DATABASE_URL=%s", internalDSN),
 		"SESSION_ABSOLUTE_TTL=2h",
 		"SESSION_IDLE_TIMEOUT=30m",
+		"SESSION_ROTATION_INTERVAL=15m",
+		"SESSION_ROTATION_GRACE_PERIOD=30s",
+		"SESSION_COOKIE_SECURE=false",
 		fmt.Sprintf("ADMIN_USERNAME=%s", adminUser),
 		fmt.Sprintf("ADMIN_PASSWORD=%s", adminPass),
 	)
@@ -103,12 +106,17 @@ func setupe2e(t *testing.T) (string, *http.Client, *sql.DB, *sql.DB, string, int
 	serverBaseURL := fmt.Sprintf("http://127.0.0.1:%d", serverPort)
 
 	//Wait until the server is ready
+	serverReady := false
 	for attempt := 0; attempt < 50; attempt++ {
 		time.Sleep(100 * time.Millisecond)
 		if resp, err := http.Get(serverBaseURL + "/login"); err == nil && resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
+			serverReady = true
 			break
 		}
+	}
+	if !serverReady {
+		t.Fatal("application server did not become ready within 5 seconds; check its configuration and startup logs")
 	}
 
 	//HTTP client
@@ -136,8 +144,11 @@ func TestE2E(t *testing.T) {
 			"password": "AdminSecret123!",
 		})
 		resp, err := client.Post(serverURL+"/login", "application/json", bytes.NewReader(loginPayload))
-		if err != nil || resp.StatusCode != http.StatusSeeOther {
-			t.Fatalf("admin login failed: status %v, err %v", resp.StatusCode, err)
+		if err != nil {
+			t.Fatalf("admin login request failed: %v", err)
+		}
+		if resp.StatusCode != http.StatusSeeOther {
+			t.Fatalf("admin login failed: status %v", resp.StatusCode)
 		}
 		if len(resp.Cookies()) == 0 {
 			t.Fatal("session cookie not found in login response")

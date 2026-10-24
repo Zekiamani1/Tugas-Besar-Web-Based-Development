@@ -34,8 +34,10 @@ func TestMigrationAppIntegration(t *testing.T) {
 	}
 
 	ac := accesscontrol.NewService(internalDB, accesscontrol.SessionConfig{
-		AbsoluteTTL: 2 * time.Hour,
-		IdleTimeout: 30 * time.Minute,
+		AbsoluteTTL:      2 * time.Hour,
+		IdleTimeout:      30 * time.Minute,
+		RotationInterval: 15 * time.Minute,
+		GracePeriod:      30 * time.Second,
 	})
 	dbm := dbmanagement.NewService(internalDB)
 	t.Cleanup(dbm.CloseAllTargetConnections)
