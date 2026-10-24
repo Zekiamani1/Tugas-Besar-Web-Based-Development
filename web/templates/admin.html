@@ -28,16 +28,32 @@
 			</section>
 			<section class="card"><h2>Assign User to Group</h2>
 				<form method="POST" action="/admin/groups/members">
-					<label for="member-user">User ID</label><input id="member-user" type="number" name="user_id" value="{{.Values.Get "user_id"}}" min="1" required>
-					<label for="member-group">Group ID</label><input id="member-group" type="number" name="group_id" value="{{.Values.Get "group_id"}}" min="1" required>
+					<label for="member-user">User</label>
+					<select id="member-user" name="user_id" required>
+						<option value="" disabled {{if not (.Values.Get "user_id")}}selected{{end}}>Pilih user</option>
+						{{range .Users}}<option value="{{.ID}}" {{if eq ($.Values.Get "user_id") (printf "%d" .ID)}}selected{{end}}>{{.Username}} (User #{{.ID}})</option>{{else}}<option value="" disabled>Tidak ada user</option>{{end}}
+					</select>
+					<label for="member-group">Group</label>
+					<select id="member-group" name="group_id" required>
+						<option value="" disabled {{if not (.Values.Get "group_id")}}selected{{end}}>Pilih group</option>
+						{{range .Groups}}<option value="{{.ID}}" {{if eq ($.Values.Get "group_id") (printf "%d" .ID)}}selected{{end}}>{{.Name}} (Group #{{.ID}})</option>{{else}}<option value="" disabled>Tidak ada group</option>{{end}}
+					</select>
 					{{if eq .ErrorForm "/admin/groups/members"}}<p class="message error" role="alert">{{.Message}}</p>{{end}}
 					<button type="submit">Assign</button>
 				</form>
 			</section>
 			<section class="card"><h2>Set Group DB Access</h2>
 				<form method="POST" action="/admin/groups/permissions">
-					<label for="access-group">Group ID</label><input id="access-group" type="number" name="group_id" value="{{.Values.Get "group_id"}}" min="1" required>
-					<label for="access-db">Target DB ID</label><input id="access-db" type="number" name="target_db_id" value="{{.Values.Get "target_db_id"}}" min="1" required>
+					<label for="access-group">Group</label>
+					<select id="access-group" name="group_id" required>
+						<option value="" disabled {{if not (.Values.Get "group_id")}}selected{{end}}>Pilih group</option>
+						{{range .Groups}}<option value="{{.ID}}" {{if eq ($.Values.Get "group_id") (printf "%d" .ID)}}selected{{end}}>{{.Name}} (Group #{{.ID}})</option>{{else}}<option value="" disabled>Tidak ada group</option>{{end}}
+					</select>
+					<label for="access-db">Database</label>
+					<select id="access-db" name="target_db_id" required>
+						<option value="" disabled {{if not (.Values.Get "target_db_id")}}selected{{end}}>Pilih database</option>
+						{{range .Databases}}<option value="{{.ID}}" {{if eq ($.Values.Get "target_db_id") (printf "%d" .ID)}}selected{{end}}>{{.Name}} (Database #{{.ID}})</option>{{else}}<option value="" disabled>Tidak ada database</option>{{end}}
+					</select>
 					<label for="access-level">Access Level</label><select id="access-level" name="access_level" required><option value="VIEW_ONLY" {{if eq (.Values.Get "access_level") "VIEW_ONLY"}}selected{{end}}>View Only</option><option value="VIEW_EDIT" {{if eq (.Values.Get "access_level") "VIEW_EDIT"}}selected{{end}}>View + Edit</option></select>
 					{{if eq .ErrorForm "/admin/groups/permissions"}}<p class="message error" role="alert">{{.Message}}</p>{{end}}
 					<button type="submit">Set Access</button>

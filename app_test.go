@@ -53,10 +53,16 @@ func (m *mockAccessControlService) ValidateSession(ctx context.Context, sessionI
 }
 
 func (m *mockAccessControlService) ListUsers(ctx context.Context) ([]models.UserSummary, error) {
+	if m.listUsersFunc == nil {
+		return nil, nil
+	}
 	return m.listUsersFunc(ctx)
 }
 
 func (m *mockAccessControlService) ListGroups(ctx context.Context) ([]models.GroupSummary, error) {
+	if m.listGroupsFunc == nil {
+		return nil, nil
+	}
 	return m.listGroupsFunc(ctx)
 }
 
@@ -170,7 +176,7 @@ func newJSONRequest(t *testing.T, method, target string, payload any) *http.Requ
 
 func TestAccessControlHandlers(t *testing.T) {
 	mockAC := &mockAccessControlService{}
-	app := NewApp(mockAC, nil, nil)
+	app := NewApp(mockAC, &mockDBManagementService{}, nil)
 
 	t.Run("LoginPage", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/login", nil)
@@ -628,8 +634,18 @@ func TestDBManagementHandlers(t *testing.T) {
 
 func TestAdminBrowserForms(t *testing.T) {
 	mockAC := &mockAccessControlService{}
-	mockDBM := &mockDBManagementService{}
+	mockDBM := &mockDBManagementService{
+		listDatabasesFunc: func(context.Context) ([]models.TargetDBInfo, error) {
+			return []models.TargetDBInfo{{ID: 1, Name: "production", DBType: "postgres", Host: "localhost", Port: 5432, DBName: "prod_db"}}, nil
+		},
+	}
 	app := NewApp(mockAC, mockDBM, nil)
+	mockAC.listUsersFunc = func(context.Context) ([]models.UserSummary, error) {
+		return []models.UserSummary{{ID: 2, Username: "alice"}}, nil
+	}
+	mockAC.listGroupsFunc = func(context.Context) ([]models.GroupSummary, error) {
+		return []models.GroupSummary{{ID: 3, Name: "analysts"}}, nil
+	}
 
 	mockAC.registerFunc = func(_ context.Context, username, password string) error {
 		if username != "alice" || password != "pass123" {
@@ -697,8 +713,8 @@ func TestAdminBrowserForms(t *testing.T) {
 			t.Errorf("expected 400 for invalid numeric field, got %d", rec.Code)
 		}
 		body := rec.Body.String()
-		if !strings.Contains(body, `role="alert"`) || !strings.Contains(body, `value="3"`) || !strings.Contains(body, "ID pengguna dan grup") {
-			t.Errorf("expected inline error and preserved group ID, got %s", body)
+		if !strings.Contains(body, `role="alert"`) || !strings.Contains(body, `value="3" selected`) || !strings.Contains(body, "Pilih user dan group") {
+			t.Errorf("expected inline error and preserved group choice, got %s", body)
 		}
 	})
 
@@ -803,6 +819,11 @@ func TestAdminEntityListPages(t *testing.T) {
 		for _, href := range []string{`href="/admin/users"`, `href="/admin/groups"`, `href="/admin/databases"`} {
 			if !strings.Contains(rec.Body.String(), href) {
 				t.Errorf("expected admin link %s", href)
+			}
+		}
+		for _, option := range []string{`value="4"`, `alice (User #4)`, `analysts (Group #2)`, `analytics (Database #9)`} {
+			if !strings.Contains(rec.Body.String(), option) {
+				t.Errorf("expected named assignment option %q", option)
 			}
 		}
 	})

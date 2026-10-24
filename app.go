@@ -169,9 +169,31 @@ type adminPageData struct {
 	IsError   bool
 	ErrorForm string
 	Values    url.Values
+	Users     []models.UserSummary
+	Groups    []models.GroupSummary
+	Databases []adminDatabaseSummary
 }
 
-func renderAdminPage(w http.ResponseWriter, status int, data adminPageData) {
+func (app *App) renderAdminPage(w http.ResponseWriter, r *http.Request, status int, data adminPageData) {
+	users, err := app.ListUsers(r.Context())
+	if err != nil {
+		http.Error(w, "admin form options unavailable", http.StatusInternalServerError)
+		return
+	}
+	groups, err := app.ListGroups(r.Context())
+	if err != nil {
+		http.Error(w, "admin form options unavailable", http.StatusInternalServerError)
+		return
+	}
+	databases, err := app.ListDatabases(r.Context())
+	if err != nil {
+		http.Error(w, "admin form options unavailable", http.StatusInternalServerError)
+		return
+	}
+	data.Users = users
+	data.Groups = groups
+	data.Databases = summarizeAdminDatabases(databases)
+
 	tmpl, err := template.ParseFiles("web/templates/admin.html")
 	if err != nil {
 		http.Error(w, "admin page unavailable", http.StatusInternalServerError)
@@ -183,7 +205,7 @@ func renderAdminPage(w http.ResponseWriter, status int, data adminPageData) {
 }
 
 func (app *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
-	renderAdminPage(w, http.StatusOK, adminPageData{})
+	app.renderAdminPage(w, r, http.StatusOK, adminPageData{})
 }
 
 func (app *App) handleAdminUsersPage(w http.ResponseWriter, r *http.Request) {
@@ -223,6 +245,13 @@ func (app *App) handleAdminDatabasesPage(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "database list unavailable", http.StatusInternalServerError)
 		return
 	}
+	summaries := summarizeAdminDatabases(databases)
+	renderAdminListPage(w, "admin_databases.html", struct {
+		Databases []adminDatabaseSummary
+	}{Databases: summaries})
+}
+
+func summarizeAdminDatabases(databases []models.TargetDBInfo) []adminDatabaseSummary {
 	summaries := make([]adminDatabaseSummary, 0, len(databases))
 	for _, database := range databases {
 		summaries = append(summaries, adminDatabaseSummary{
@@ -234,9 +263,7 @@ func (app *App) handleAdminDatabasesPage(w http.ResponseWriter, r *http.Request)
 			DBName: database.DBName,
 		})
 	}
-	renderAdminListPage(w, "admin_databases.html", struct {
-		Databases []adminDatabaseSummary
-	}{Databases: summaries})
+	return summaries
 }
 
 func renderAdminListPage(w http.ResponseWriter, page string, data any) {
@@ -256,9 +283,9 @@ func isFormRequest(r *http.Request) bool {
 	return contentType == "application/x-www-form-urlencoded"
 }
 
-func adminRequestError(w http.ResponseWriter, r *http.Request, status int, message string) {
+func (app *App) adminRequestError(w http.ResponseWriter, r *http.Request, status int, message string) {
 	if isFormRequest(r) {
-		renderAdminPage(w, status, adminPageData{
+		app.renderAdminPage(w, r, status, adminPageData{
 			Message:   message,
 			IsError:   true,
 			ErrorForm: r.URL.Path,
@@ -348,14 +375,14 @@ func (app *App) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		req.Password = form.Get("password")
 		return nil
 	}); err != nil {
-		adminRequestError(w, r, http.StatusBadRequest, "Periksa kembali data pengguna.")
+		app.adminRequestError(w, r, http.StatusBadRequest, "Periksa kembali data pengguna.")
 		return
 	}
 	if err := app.Register(r.Context(), req.Username, req.Password); err != nil {
-		adminRequestError(w, r, http.StatusInternalServerError, "Pengguna tidak dapat ditambahkan. Periksa data dan coba lagi.")
+		app.adminRequestError(w, r, http.StatusInternalServerError, "Pengguna tidak dapat ditambahkan. Periksa data dan coba lagi.")
 		return
 	}
-	renderAdminPage(w, http.StatusOK, adminPageData{Message: fmt.Sprintf("berhasil menambahkan %s", req.Username)})
+	app.renderAdminPage(w, r, http.StatusOK, adminPageData{Message: fmt.Sprintf("berhasil menambahkan %s", req.Username)})
 }
 
 func (app *App) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
@@ -366,14 +393,14 @@ func (app *App) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		req.GroupName = form.Get("group_name")
 		return nil
 	}); err != nil {
-		adminRequestError(w, r, http.StatusBadRequest, "Periksa kembali nama grup.")
+		app.adminRequestError(w, r, http.StatusBadRequest, "Periksa kembali nama grup.")
 		return
 	}
 	if err := app.CreateGroup(r.Context(), req.GroupName); err != nil {
-		adminRequestError(w, r, http.StatusInternalServerError, "Grup tidak dapat dibuat. Periksa nama dan coba lagi.")
+		app.adminRequestError(w, r, http.StatusInternalServerError, "Grup tidak dapat dibuat. Periksa nama dan coba lagi.")
 		return
 	}
-	renderAdminPage(w, http.StatusOK, adminPageData{Message: fmt.Sprintf("berhasil menambahkan group %s", req.GroupName)})
+	app.renderAdminPage(w, r, http.StatusOK, adminPageData{Message: fmt.Sprintf("berhasil menambahkan group %s", req.GroupName)})
 }
 
 func (app *App) handleAssignUserToGroup(w http.ResponseWriter, r *http.Request) {
@@ -388,14 +415,14 @@ func (app *App) handleAssignUserToGroup(w http.ResponseWriter, r *http.Request) 
 		req.GroupID, err = strconv.Atoi(form.Get("group_id"))
 		return err
 	}); err != nil {
-		adminRequestError(w, r, http.StatusBadRequest, "ID pengguna dan grup harus berupa angka.")
+		app.adminRequestError(w, r, http.StatusBadRequest, "Pilih user dan group yang valid.")
 		return
 	}
 	if err := app.AssignUserToGroup(r.Context(), req.UserID, req.GroupID); err != nil {
-		adminRequestError(w, r, http.StatusInternalServerError, "Pengguna tidak dapat dimasukkan ke grup. Periksa ID dan coba lagi.")
+		app.adminRequestError(w, r, http.StatusInternalServerError, "Pengguna tidak dapat dimasukkan ke grup. Periksa pilihan dan coba lagi.")
 		return
 	}
-	renderAdminPage(w, http.StatusOK, adminPageData{Message: fmt.Sprintf("berhasil memasukkan user_id %d ke group_id %d", req.UserID, req.GroupID)})
+	app.renderAdminPage(w, r, http.StatusOK, adminPageData{Message: fmt.Sprintf("berhasil memasukkan user_id %d ke group_id %d", req.UserID, req.GroupID)})
 }
 
 func (app *App) handleSetGroupDBAccess(w http.ResponseWriter, r *http.Request) {
@@ -414,14 +441,14 @@ func (app *App) handleSetGroupDBAccess(w http.ResponseWriter, r *http.Request) {
 		req.AccessLevel = form.Get("access_level")
 		return nil
 	}); err != nil {
-		adminRequestError(w, r, http.StatusBadRequest, "ID grup dan database harus berupa angka.")
+		app.adminRequestError(w, r, http.StatusBadRequest, "Pilih group dan database yang valid.")
 		return
 	}
 	if err := app.SetGroupDBAccess(r.Context(), req.GroupID, req.TargetDBID, req.AccessLevel); err != nil {
-		adminRequestError(w, r, http.StatusInternalServerError, "Izin database tidak dapat disimpan. Periksa data dan coba lagi.")
+		app.adminRequestError(w, r, http.StatusInternalServerError, "Izin database tidak dapat disimpan. Periksa pilihan dan coba lagi.")
 		return
 	}
-	renderAdminPage(w, http.StatusOK, adminPageData{Message: fmt.Sprintf("berhasil meng-set hak akses group_id %d pada target_db_id %d menjadi %s", req.GroupID, req.TargetDBID, req.AccessLevel)})
+	app.renderAdminPage(w, r, http.StatusOK, adminPageData{Message: fmt.Sprintf("berhasil meng-set hak akses group_id %d pada target_db_id %d menjadi %s", req.GroupID, req.TargetDBID, req.AccessLevel)})
 }
 
 func (app *App) handleRegisterTargetDB(w http.ResponseWriter, r *http.Request) {
@@ -438,15 +465,15 @@ func (app *App) handleRegisterTargetDB(w http.ResponseWriter, r *http.Request) {
 		info.DBName = form.Get("db_name")
 		return nil
 	}); err != nil {
-		adminRequestError(w, r, http.StatusBadRequest, "Port harus berupa angka dan semua data koneksi perlu diisi.")
+		app.adminRequestError(w, r, http.StatusBadRequest, "Port harus berupa angka dan semua data koneksi perlu diisi.")
 		return
 	}
 	dbID, err := app.RegisterTargetDB(r.Context(), info)
 	if err != nil {
-		adminRequestError(w, r, http.StatusInternalServerError, "Database tidak dapat didaftarkan. Periksa koneksi dan coba lagi.")
+		app.adminRequestError(w, r, http.StatusInternalServerError, "Database tidak dapat didaftarkan. Periksa koneksi dan coba lagi.")
 		return
 	}
-	renderAdminPage(w, http.StatusOK, adminPageData{Message: fmt.Sprintf("DB ditambahkan dengan id %d", dbID)})
+	app.renderAdminPage(w, r, http.StatusOK, adminPageData{Message: fmt.Sprintf("DB ditambahkan dengan id %d", dbID)})
 }
 
 func (app *App) handleGetSchemas(w http.ResponseWriter, r *http.Request) {
