@@ -27,7 +27,7 @@ type mockAccessControlService struct {
 	validateSessionFunc      func(ctx context.Context, sessionID string) (int, error)
 	validateWithRotationFunc func(ctx context.Context, sessionID string) (models.SessionValidation, error)
 	listUsersFunc            func(ctx context.Context) ([]models.UserSummary, error)
-	listGroupsFunc           func(ctx context.Context) ([]models.GroupSummary, error)
+	listGroupsFunc           func(ctx context.Context) ([]models.Group, error)
 	isAdminFunc              func(ctx context.Context, userID int) (bool, error)
 	evaluateDBAccessFunc     func(ctx context.Context, userID, targetDBID int, requiredLevel string) error
 	createGroupFunc          func(ctx context.Context, groupName string) error
@@ -79,11 +79,19 @@ func (m *mockAccessControlService) ListUsers(ctx context.Context) ([]models.User
 	return m.listUsersFunc(ctx)
 }
 
-func (m *mockAccessControlService) ListGroups(ctx context.Context) ([]models.GroupSummary, error) {
+func (m *mockAccessControlService) ListGroups(ctx context.Context) ([]models.Group, error) {
 	if m.listGroupsFunc == nil {
 		return nil, nil
 	}
 	return m.listGroupsFunc(ctx)
+}
+
+func (m *mockAccessControlService) ListGroupMembers(context.Context) ([]models.GroupMemberSummary, error) {
+	return nil, nil
+}
+
+func (m *mockAccessControlService) ListGroupDBAccess(context.Context) ([]models.GroupDBAccessSummary, error) {
+	return nil, nil
 }
 
 func (m *mockAccessControlService) IsAdmin(ctx context.Context, userID int) (bool, error) {
@@ -681,8 +689,8 @@ func TestAdminBrowserForms(t *testing.T) {
 	mockAC.listUsersFunc = func(context.Context) ([]models.UserSummary, error) {
 		return []models.UserSummary{{ID: 2, Username: "alice"}}, nil
 	}
-	mockAC.listGroupsFunc = func(context.Context) ([]models.GroupSummary, error) {
-		return []models.GroupSummary{{ID: 3, Name: "analysts"}}, nil
+	mockAC.listGroupsFunc = func(context.Context) ([]models.Group, error) {
+		return []models.Group{{ID: 3, Name: "analysts"}}, nil
 	}
 
 	mockAC.registerFunc = func(_ context.Context, username, password string) error {
@@ -801,8 +809,8 @@ func TestAdminEntityListPages(t *testing.T) {
 		listUsersFunc: func(context.Context) ([]models.UserSummary, error) {
 			return []models.UserSummary{{ID: 4, Username: "alice", IsAdmin: false}}, nil
 		},
-		listGroupsFunc: func(context.Context) ([]models.GroupSummary, error) {
-			return []models.GroupSummary{{ID: 2, Name: "analysts"}}, nil
+		listGroupsFunc: func(context.Context) ([]models.Group, error) {
+			return []models.Group{{ID: 2, Name: "analysts"}}, nil
 		},
 	}
 	mockDBM := &mockDBManagementService{

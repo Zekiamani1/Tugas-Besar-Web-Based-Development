@@ -90,10 +90,19 @@ type Group struct {
 	Name string `gorm:"uniqueIndex;not null"`
 }
 
-// GroupSummary contains the group fields needed by admin pages.
-type GroupSummary struct {
-	ID   int
-	Name string
+// GroupMemberSummary contains safe user details for a group's member list.
+type GroupMemberSummary struct {
+	GroupID  int
+	UserID   int
+	Username string
+}
+
+// GroupDBAccessSummary describes one database permission assigned to a group.
+type GroupDBAccessSummary struct {
+	GroupID      int
+	TargetDBID   int
+	DatabaseName string
+	AccessLevel  string
 }
 
 type UserGroup struct {

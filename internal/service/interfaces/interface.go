@@ -14,7 +14,9 @@ type AccessControlService interface {
 	ValidateSession(ctx context.Context, sessionID string) (int, error)
 	ValidateSessionWithRotation(ctx context.Context, sessionID string) (models.SessionValidation, error)
 	ListUsers(ctx context.Context) ([]models.UserSummary, error)
-	ListGroups(ctx context.Context) ([]models.GroupSummary, error)
+	ListGroups(ctx context.Context) ([]models.Group, error)
+	ListGroupMembers(ctx context.Context) ([]models.GroupMemberSummary, error)
+	ListGroupDBAccess(ctx context.Context) ([]models.GroupDBAccessSummary, error)
 	CreateGroup(ctx context.Context, groupName string) error
 	AssignUserToGroup(ctx context.Context, userID, groupID int) error
 	SetGroupDBAccess(ctx context.Context, groupID, targetDBID int, accessLevel string) error

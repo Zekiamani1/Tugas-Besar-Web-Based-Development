@@ -16,8 +16,17 @@
 			<h2>Group list</h2>
 			{{if .Groups}}
 			<div class="table-wrap"><table>
-				<thead><tr><th scope="col">ID</th><th scope="col">Name</th></tr></thead>
-				<tbody>{{range .Groups}}<tr><td>{{.ID}}</td><td>{{.Name}}</td></tr>{{end}}</tbody>
+				<thead><tr><th scope="col">ID</th><th scope="col">Name</th><th scope="col">Anggota</th><th scope="col">Akses database</th></tr></thead>
+				<tbody>
+				{{range .Groups}}
+				<tr>
+					<td>{{.ID}}</td>
+					<td>{{.Name}}</td>
+					<td><ul class="item-list">{{range .Members}}<li>{{.Username}} <span class="muted">(User #{{.ID}})</span></li>{{else}}<li class="empty-state">Belum ada anggota.</li>{{end}}</ul></td>
+					<td><ul class="item-list">{{range .DatabaseAccess}}<li>{{.DatabaseName}} <span class="muted">(Database #{{.TargetDBID}})</span> — {{if eq .AccessLevel "VIEW_EDIT"}}View + Edit{{else}}View Only{{end}}</li>{{else}}<li class="empty-state">Belum ada akses database.</li>{{end}}</ul></td>
+				</tr>
+				{{end}}
+				</tbody>
 			</table></div>
 			{{else}}<p class="empty-state">Belum ada group.</p>{{end}}
 		</section>
