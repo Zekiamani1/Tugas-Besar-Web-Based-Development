@@ -136,8 +136,6 @@ func (s *Service) ExplainMigration(ctx context.Context, targetDBID, migrationID 
 	if conn == nil {
 		return "", errors.New("target database connection is nil")
 	}
-	defer conn.Close()
-
 	stmt, err := conn.PrepareContext(ctx, "EXPLAIN "+record.SQLQuery)
 	if err != nil {
 		return "", fmt.Errorf("prepare migration query plan: %w", err)
