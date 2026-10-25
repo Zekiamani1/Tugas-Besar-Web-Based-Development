@@ -540,8 +540,10 @@ func (app *App) handleRegisterTargetDB(w http.ResponseWriter, r *http.Request) {
 		info.Name = form.Get("name")
 		info.DBType = form.Get("db_type")
 		info.Host = form.Get("host")
-		if info.Port, err = strconv.Atoi(form.Get("port")); err != nil {
-			return err
+		if portStr := form.Get("port"); portStr != "" {
+			if info.Port, err = strconv.Atoi(portStr); err != nil {
+				return err
+			}
 		}
 		info.User = form.Get("user")
 		info.Password = form.Get("password")

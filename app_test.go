@@ -470,6 +470,52 @@ func TestDBManagementHandlers(t *testing.T) {
 		}
 	})
 
+	t.Run("RegisterTargetDB_MySQL", func(t *testing.T) {
+		mockDBM.registerTargetDBFunc = func(ctx context.Context, info models.TargetDBInfo) (int, error) {
+			if info.Name != "analytics_mysql" || info.DBType != "mysql" || info.Port != 3306 || info.DBName != "analytics" {
+				t.Errorf("unexpected MySQL TargetDBInfo: %+v", info)
+			}
+			return 2, nil
+		}
+
+		req := newJSONRequest(t, http.MethodPost, "/admin/databases", models.TargetDBInfo{
+			Name:     "analytics_mysql",
+			DBType:   "mysql",
+			Host:     "127.0.0.1",
+			Port:     3306,
+			User:     "root",
+			Password: "secret",
+			DBName:   "analytics",
+		})
+		rec := httptest.NewRecorder()
+		app.handleRegisterTargetDB(rec, req)
+
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "DB ditambahkan dengan id 2") {
+			t.Errorf("expected 200 OK with success message on admin page, got code=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("RegisterTargetDB_SQLite", func(t *testing.T) {
+		mockDBM.registerTargetDBFunc = func(ctx context.Context, info models.TargetDBInfo) (int, error) {
+			if info.Name != "catalog_sqlite" || info.DBType != "sqlite" || info.DBName != "/data/app.db" {
+				t.Errorf("unexpected SQLite TargetDBInfo: %+v", info)
+			}
+			return 3, nil
+		}
+
+		req := newJSONRequest(t, http.MethodPost, "/admin/databases", models.TargetDBInfo{
+			Name:   "catalog_sqlite",
+			DBType: "sqlite",
+			DBName: "/data/app.db",
+		})
+		rec := httptest.NewRecorder()
+		app.handleRegisterTargetDB(rec, req)
+
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "DB ditambahkan dengan id 3") {
+			t.Errorf("expected 200 OK with success message on admin page, got code=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
 	t.Run("Dashboard", func(t *testing.T) {
 		mockAC.validateSessionFunc = func(_ context.Context, sessionID string) (int, error) {
 			if sessionID != "viewer-session" {

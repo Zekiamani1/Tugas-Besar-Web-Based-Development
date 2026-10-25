@@ -8,7 +8,7 @@
 
 ## Deskripsi
 
-Database Manager adalah aplikasi web untuk mengelola akses ke database PostgreSQL bersama. Platform Admin dapat mengatur pengguna, group, koneksi database, dan izin group. Pengguna dapat menjelajahi database yang diizinkan serta membuat, meninjau, dan menjalankan migration.
+Database Manager adalah aplikasi web untuk mengelola akses ke database target bersama (mendukung PostgreSQL, MySQL, dan SQLite). Platform Admin dapat mengatur pengguna, group, koneksi database, dan izin group. Pengguna dapat menjelajahi database yang diizinkan serta membuat, meninjau, dan menjalankan migration.
 
 ## Fitur
 
@@ -16,7 +16,7 @@ Database Manager adalah aplikasi web untuk mengelola akses ke database PostgreSQ
 - Pengelolaan pengguna dan group, termasuk melihat anggota setiap group.
 - Pemberian izin database kepada group dengan tingkat **View Only** atau **View + Edit**.
 - Ringkasan database yang dapat diakses setiap group.
-- PostgreSQL viewer untuk melihat schema, tabel, kolom, constraint, index, dan data.
+- Database viewer untuk melihat schema, tabel, kolom, constraint, index, dan data.
 - Pembuatan dan pengubahan draft migration sebelum dieksekusi.
 - Eksekusi migration dalam transaksi pada database target, dengan rollback jika SQL gagal.
 - Riwayat migration yang mencatat versi, SQL, pelaksana, waktu, dan status.
@@ -34,7 +34,7 @@ Database Manager adalah aplikasi web untuk mengelola akses ke database PostgreSQ
 │   ├── models/                          # Model data dan ringkasan untuk UI
 │   └── service/
 │       ├── accesscontrol/               # User, session, group, dan izin
-│       ├── dbmanagement/                # Koneksi dan PostgreSQL viewer
+│       ├── dbmanagement/                # Koneksi dan database viewer
 │       ├── interfaces/                  # Kontrak antarservice
 │       └── migration/                   # Draft, eksekusi, dan riwayat migration
 ├── web/
@@ -76,4 +76,4 @@ docker compose up --build
 
 Buka [http://localhost:8080](http://localhost:8080), lalu login menggunakan `ADMIN_USERNAME` dan `ADMIN_PASSWORD` dari `.env`. Port host dapat diubah melalui `APP_PORT`.
 
-Saat mendaftarkan database target melalui Admin Panel, gunakan host yang dapat dijangkau oleh container aplikasi. Untuk menghentikan aplikasi, tekan `Ctrl+C`. Data PostgreSQL internal disimpan dalam Docker volume.
+Saat mendaftarkan database target melalui Admin Panel, pilih tipe database. Untuk PostgreSQL dan MySQL, gunakan host dan port yang dapat dijangkau oleh container aplikasi. Untuk SQLite, isi path file database pada field `db_name` (host, port, user, dan password dapat dikosongkan). Untuk menghentikan aplikasi, tekan `Ctrl+C`. Data PostgreSQL internal disimpan dalam Docker volume.
