@@ -229,3 +229,253 @@ func TestDatabaseInformation(t *testing.T) {
 		svc.CloseAllTargetConnections()
 	})
 }
+
+func TestSQLiteSupport(t *testing.T) {
+	ctx := context.Background()
+	internalDB, internalMock, rawInternalDB := newMockGormDB(t)
+	defer rawInternalDB.Close()
+
+	dbFile := t.TempDir() + "/sqlite_test.db"
+	rawSQLite, err := sql.Open("sqlite", dbFile)
+	if err != nil {
+		t.Fatalf("failed to open raw sqlite: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE items (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			sku TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL,
+			price REAL
+		)`,
+		`INSERT INTO items (sku, title, price) VALUES ('SKU-1', 'Keyboard', 49.99)`,
+	} {
+		if _, err := rawSQLite.Exec(stmt); err != nil {
+			t.Fatalf("failed to seed sqlite: %v", err)
+		}
+	}
+	rawSQLite.Close()
+
+	svc := NewService(internalDB)
+
+	// 1. Register SQLite database
+	internalMock.ExpectBegin()
+	internalMock.ExpectQuery(`INSERT INTO`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(5))
+	internalMock.ExpectCommit()
+
+	dbID, err := svc.RegisterTargetDB(ctx, models.TargetDBInfo{
+		Name:   "SQLite Catalog",
+		DBType: "sqlite",
+		DBName: dbFile,
+	})
+	if err != nil || dbID != 5 {
+		t.Fatalf("expected SQLite register to succeed with id=5, got id=%d err=%v", dbID, err)
+	}
+
+	// Mock DB info lookup
+	internalMock.ExpectQuery(`SELECT .*`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "db_type", "host", "port", "user", "password", "db_name"}).
+			AddRow(5, "SQLite Catalog", "sqlite", "", 0, "", "", dbFile))
+
+	// 2. Fetch Schemas
+	schemas, err := svc.GetSchemas(ctx, 5)
+	if err != nil {
+		t.Fatalf("expected GetSchemas to succeed for SQLite: %v", err)
+	}
+	if len(schemas) == 0 || schemas[0] != "main" {
+		t.Errorf("unexpected schemas for SQLite: %v", schemas)
+	}
+
+	// 3. Fetch Tables
+	tables, err := svc.GetTables(ctx, 5, "main")
+	if err != nil {
+		t.Fatalf("expected GetTables to succeed for SQLite: %v", err)
+	}
+	if len(tables) != 1 || tables[0] != "items" {
+		t.Fatalf("expected [items] table for SQLite, got %v", tables)
+	}
+
+	// 4. Fetch Table Details (columns, constraints, indexes)
+	details, err := svc.GetTableDetails(ctx, 5, "main", "items")
+	if err != nil {
+		t.Fatalf("expected GetTableDetails to succeed for SQLite: %v", err)
+	}
+	if details.TableName != "items" {
+		t.Errorf("expected items table name, got %s", details.TableName)
+	}
+	if len(details.Columns) != 4 {
+		t.Errorf("expected 4 columns for SQLite items table, got %d", len(details.Columns))
+	}
+	hasPK := false
+	for _, c := range details.Constraints {
+		if c.Type == "PRIMARY KEY" {
+			hasPK = true
+		}
+	}
+	if !hasPK {
+		t.Errorf("expected PRIMARY KEY constraint for SQLite items, got %v", details.Constraints)
+	}
+	hasUnique := false
+	for _, idx := range details.Indexes {
+		if idx.IsUnique {
+			hasUnique = true
+		}
+	}
+	if !hasUnique {
+		t.Errorf("expected unique index on sku for SQLite items, got %v", details.Indexes)
+	}
+
+	// 5. Fetch Table Data
+	rows, err := svc.GetTableData(ctx, 5, "main", "items", 10, 0)
+	if err != nil {
+		t.Fatalf("expected GetTableData to succeed for SQLite: %v", err)
+	}
+	if len(rows) != 1 || rows[0]["sku"] != "SKU-1" {
+		t.Errorf("unexpected rows data from SQLite items: %v", rows)
+	}
+
+	svc.CloseAllTargetConnections()
+}
+
+func TestMySQLSupport(t *testing.T) {
+	ctx := context.Background()
+	internalDB, internalMock, rawInternalDB := newMockGormDB(t)
+	defer rawInternalDB.Close()
+
+	// Use sqlmock to mock MySQL target behavior
+	targetDB, targetMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create target sqlmock: %v", err)
+	}
+	defer targetDB.Close()
+
+	svc := NewService(internalDB)
+
+	// Register MySQL target DB
+	internalMock.ExpectBegin()
+	internalMock.ExpectQuery(`INSERT INTO`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(8))
+	internalMock.ExpectCommit()
+
+	dbID, err := svc.RegisterTargetDB(ctx, models.TargetDBInfo{
+		Name:     "MySQL Store",
+		DBType:   "mysql",
+		Host:     "127.0.0.1",
+		Port:     3306,
+		User:     "root",
+		Password: "secret",
+		DBName:   "store_db",
+	})
+	if err != nil || dbID != 8 {
+		t.Fatalf("expected RegisterTargetDB for MySQL to succeed with id=8, got id=%d err=%v", dbID, err)
+	}
+
+	// Mock internal DB lookup
+	internalMock.ExpectQuery(`SELECT .*`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "db_type", "host", "port", "user", "password", "db_name"}).
+			AddRow(8, "MySQL Store", "mysql", "127.0.0.1", 3306, "root", "secret", "store_db"))
+
+	// Pre-populate connection in service so it doesn't try to open real TCP connection to 127.0.0.1:3306
+	svc.conns.Store(8, targetDB)
+	svc.infos.Store(8, models.TargetDBInfo{
+		ID:       8,
+		Name:     "MySQL Store",
+		DBType:   "mysql",
+		Host:     "127.0.0.1",
+		Port:     3306,
+		User:     "root",
+		Password: "secret",
+		DBName:   "store_db",
+	})
+
+	// 1. Get Schemas
+	targetMock.ExpectQuery(regexp.QuoteMeta(`SELECT schema_name FROM information_schema.schemata WHERE schema_name = ?`)).
+		WithArgs("store_db").
+		WillReturnRows(sqlmock.NewRows([]string{"schema_name"}).AddRow("store_db"))
+
+	schemas, err := svc.GetSchemas(ctx, 8)
+	if err != nil {
+		t.Fatalf("expected GetSchemas for MySQL to succeed: %v", err)
+	}
+	if len(schemas) != 1 || schemas[0] != "store_db" {
+		t.Errorf("unexpected schemas for MySQL: %v", schemas)
+	}
+
+	// 2. Get Tables
+	targetMock.ExpectQuery(regexp.QuoteMeta(`SELECT table_name FROM information_schema.tables WHERE table_schema = ?`)).
+		WithArgs("store_db").
+		WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("orders").AddRow("customers"))
+
+	tables, err := svc.GetTables(ctx, 8, "store_db")
+	if err != nil {
+		t.Fatalf("expected GetTables for MySQL to succeed: %v", err)
+	}
+	if len(tables) != 2 || tables[0] != "orders" || tables[1] != "customers" {
+		t.Errorf("unexpected tables for MySQL: %v", tables)
+	}
+
+	// 3. Get Table Details
+	targetMock.ExpectQuery(regexp.QuoteMeta(`SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = ? AND table_name = ?`)).
+		WithArgs("store_db", "orders").
+		WillReturnRows(sqlmock.NewRows([]string{"column_name", "data_type", "is_nullable"}).
+			AddRow("id", "bigint", "NO").
+			AddRow("total", "decimal", "YES"))
+
+	targetMock.ExpectQuery(regexp.QuoteMeta(`SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_schema = ? AND table_name = ?`)).
+		WithArgs("store_db", "orders").
+		WillReturnRows(sqlmock.NewRows([]string{"constraint_name", "constraint_type"}).
+			AddRow("PRIMARY", "PRIMARY KEY"))
+
+	targetMock.ExpectQuery(regexp.QuoteMeta(`SELECT DISTINCT index_name, non_unique FROM information_schema.statistics WHERE table_schema = ? AND table_name = ?`)).
+		WithArgs("store_db", "orders").
+		WillReturnRows(sqlmock.NewRows([]string{"index_name", "non_unique"}).
+			AddRow("PRIMARY", 0))
+
+	details, err := svc.GetTableDetails(ctx, 8, "store_db", "orders")
+	if err != nil {
+		t.Fatalf("expected GetTableDetails for MySQL to succeed: %v", err)
+	}
+	if details.TableName != "orders" || len(details.Columns) != 2 || len(details.Constraints) != 1 || len(details.Indexes) != 1 {
+		t.Errorf("unexpected MySQL table details: %+v", details)
+	}
+	if !details.Indexes[0].IsUnique {
+		t.Errorf("expected MySQL PRIMARY index to be marked unique")
+	}
+
+	// 4. Get Table Data
+	targetMock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `store_db`.`orders` LIMIT ? OFFSET ?")).
+		WithArgs(10, 0).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "total"}).AddRow(1, 100.5))
+
+	rows, err := svc.GetTableData(ctx, 8, "store_db", "orders", 10, 0)
+	if err != nil {
+		t.Fatalf("expected GetTableData for MySQL to succeed: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("unexpected rows count for MySQL: %v", rows)
+	}
+
+	targetMock.ExpectClose()
+	svc.CloseAllTargetConnections()
+}
+
+func TestErrorHandling(t *testing.T) {
+	ctx := context.Background()
+	internalDB, internalMock, rawInternalDB := newMockGormDB(t)
+	defer rawInternalDB.Close()
+
+	svc := NewService(internalDB)
+
+	t.Run("UnknownTargetDB", func(t *testing.T) {
+		internalMock.ExpectQuery(`SELECT .*`).
+			WillReturnError(sql.ErrNoRows)
+
+		conn, err := svc.GetTargetConnection(ctx, 8888)
+		if err == nil {
+			t.Errorf("expected error for unregistered targetDBID, got nil")
+		}
+		if conn != nil {
+			t.Errorf("expected nil connection on error, got %v", conn)
+		}
+	})
+}

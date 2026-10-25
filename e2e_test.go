@@ -19,10 +19,36 @@ import (
 
 	"wbd/internal/models"
 
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	"github.com/testcontainers/testcontainers-go"
+	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	_ "modernc.org/sqlite"
 )
+
+func startMySQLServer(t *testing.T, dbName string) (*tcmysql.MySQLContainer, string, int, string, string) {
+	t.Helper()
+	ctx := context.Background()
+	container, err := tcmysql.Run(ctx, "mysql:8.0",
+		tcmysql.WithDatabase(dbName),
+		tcmysql.WithUsername("testuser"),
+		tcmysql.WithPassword("secret"),
+	)
+	testcontainers.CleanupContainer(t, container)
+	if err != nil {
+		t.Fatalf("failed to start mysql container for %s: %v", dbName, err)
+	}
+	host, err := container.Host(ctx)
+	if err != nil {
+		t.Fatalf("failed to get mysql host: %v", err)
+	}
+	port, err := container.MappedPort(ctx, "3306/tcp")
+	if err != nil {
+		t.Fatalf("failed to get mysql port: %v", err)
+	}
+	return container, host, int(port.Num()), "testuser", "secret"
+}
 
 func startPostgresServer(t *testing.T, dbName string) (*tcpostgres.PostgresContainer, string) {
 	t.Helper()
@@ -133,9 +159,12 @@ func setupe2e(t *testing.T) (string, *http.Client, *sql.DB, *sql.DB, string, int
 }
 
 func TestE2E(t *testing.T) {
+	rootT := t
 	serverURL, client, internalDB, targetDB, targetHost, targetPort := setupe2e(t)
 
 	var targetDatabaseID int
+	var sqliteDatabaseID int
+	var mysqlDatabaseID int
 	var devUserID, analystUserID, devGroupID, analystGroupID int
 	var draftID string
 	t.Run("Admin Login", func(t *testing.T) {
@@ -174,6 +203,85 @@ func TestE2E(t *testing.T) {
 
 		if err := internalDB.QueryRow("SELECT id FROM target_db_infos WHERE name = 'Toko Online Production'").Scan(&targetDatabaseID); err != nil {
 			t.Fatalf("failed to query target db id: %v", err)
+		}
+	})
+
+	t.Run("Registers SQLite Target Database", func(t *testing.T) {
+		sqliteFile := filepath.Join(rootT.TempDir(), "e2e_sqlite.db")
+		rawSQLite, err := sql.Open("sqlite", sqliteFile)
+		if err != nil {
+			t.Fatalf("failed to open raw sqlite: %v", err)
+		}
+		for _, stmt := range []string{
+			`CREATE TABLE e2e_articles (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				title TEXT NOT NULL,
+				content TEXT
+			)`,
+			`INSERT INTO e2e_articles (title, content) VALUES ('Hello World', 'First content')`,
+		} {
+			if _, err := rawSQLite.Exec(stmt); err != nil {
+				t.Fatalf("failed to seed sqlite: %v", err)
+			}
+		}
+		rawSQLite.Close()
+
+		dbPayload, _ := json.Marshal(models.TargetDBInfo{
+			Name:   "SQLite E2E Database",
+			DBType: "sqlite",
+			DBName: sqliteFile,
+		})
+		resp, err := client.Post(serverURL+"/admin/databases", "application/json", bytes.NewReader(dbPayload))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("failed to register sqlite target database: %v", err)
+		}
+		resp.Body.Close()
+
+		if err := internalDB.QueryRow("SELECT id FROM target_db_infos WHERE name = 'SQLite E2E Database'").Scan(&sqliteDatabaseID); err != nil {
+			t.Fatalf("failed to query sqlite target db id: %v", err)
+		}
+	})
+
+	t.Run("Registers MySQL Target Database", func(t *testing.T) {
+		const mysqlDBName = "e2e_mysql"
+		_, mHost, mPort, mUser, mPass := startMySQLServer(rootT, mysqlDBName)
+
+		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true", mUser, mPass, mHost, mPort, mysqlDBName)
+		rawDB, err := sql.Open("mysql", dsn)
+		if err != nil {
+			t.Fatalf("failed to open mysql: %v", err)
+		}
+		for _, stmt := range []string{
+			`CREATE TABLE e2e_orders (
+				id INT AUTO_INCREMENT PRIMARY KEY,
+				order_no VARCHAR(100) NOT NULL UNIQUE,
+				amount DECIMAL(10, 2)
+			)`,
+			`INSERT INTO e2e_orders (order_no, amount) VALUES ('ORD-001', 123.45)`,
+		} {
+			if _, err := rawDB.Exec(stmt); err != nil {
+				t.Fatalf("failed to seed mysql: %v", err)
+			}
+		}
+		rawDB.Close()
+
+		dbPayload, _ := json.Marshal(models.TargetDBInfo{
+			Name:     "MySQL E2E Database",
+			DBType:   "mysql",
+			Host:     mHost,
+			Port:     mPort,
+			User:     mUser,
+			Password: mPass,
+			DBName:   mysqlDBName,
+		})
+		resp, err := client.Post(serverURL+"/admin/databases", "application/json", bytes.NewReader(dbPayload))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("failed to register mysql target database: %v", err)
+		}
+		resp.Body.Close()
+
+		if err := internalDB.QueryRow("SELECT id FROM target_db_infos WHERE name = 'MySQL E2E Database'").Scan(&mysqlDatabaseID); err != nil {
+			t.Fatalf("failed to query mysql target db id: %v", err)
 		}
 	})
 
@@ -231,19 +339,21 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("Sets Group Database Access Permissions", func(t *testing.T) {
-		for _, p := range []struct {
-			groupID int
-			level   string
-		}{
-			{devGroupID, "VIEW_EDIT"},
-			{analystGroupID, "VIEW_ONLY"},
-		} {
-			permPayload, _ := json.Marshal(map[string]any{"group_id": p.groupID, "target_db_id": targetDatabaseID, "access_level": p.level})
-			resp, err := client.Post(serverURL+"/admin/groups/permissions", "application/json", bytes.NewReader(permPayload))
-			if err != nil || resp.StatusCode != http.StatusOK {
-				t.Fatalf("failed to set permissions for group %d: status %v", p.groupID, resp.StatusCode)
+		for _, dbID := range []int{targetDatabaseID, sqliteDatabaseID, mysqlDatabaseID} {
+			for _, p := range []struct {
+				groupID int
+				level   string
+			}{
+				{devGroupID, "VIEW_EDIT"},
+				{analystGroupID, "VIEW_ONLY"},
+			} {
+				permPayload, _ := json.Marshal(map[string]any{"group_id": p.groupID, "target_db_id": dbID, "access_level": p.level})
+				resp, err := client.Post(serverURL+"/admin/groups/permissions", "application/json", bytes.NewReader(permPayload))
+				if err != nil || resp.StatusCode != http.StatusOK {
+					t.Fatalf("failed to set permissions for group %d on db %d: status %v", p.groupID, dbID, resp.StatusCode)
+				}
+				resp.Body.Close()
 			}
-			resp.Body.Close()
 		}
 	})
 
@@ -302,6 +412,71 @@ func TestE2E(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK || !strings.Contains(string(bodyBytes), "public") {
 			t.Errorf("failed to open schema page: status %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("Analyst Views SQLite Table Info", func(t *testing.T) {
+		resp, err := client.Get(fmt.Sprintf("%s/databases/%d/schemas", serverURL, sqliteDatabaseID))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("failed to open sqlite schemas: status %v", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(body), "main") {
+			t.Errorf("expected 'main' in sqlite schema page: %s", string(body))
+		}
+
+		resp, err = client.Get(fmt.Sprintf("%s/databases/%d/schemas/main/tables", serverURL, sqliteDatabaseID))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("failed to open sqlite tables: status %v", resp.StatusCode)
+		}
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(body), "e2e_articles") {
+			t.Errorf("expected 'e2e_articles' in sqlite tables page: %s", string(body))
+		}
+
+		resp, err = client.Get(fmt.Sprintf("%s/databases/%d/schemas/main/tables/e2e_articles", serverURL, sqliteDatabaseID))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("failed to open sqlite table details: status %v", resp.StatusCode)
+		}
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(body), "title") || !strings.Contains(string(body), "PRIMARY KEY") {
+			t.Errorf("expected table info in sqlite details: %s", string(body))
+		}
+	})
+
+	t.Run("Analyst Views MySQL Table Info", func(t *testing.T) {
+		const mysqlDBName = "e2e_mysql"
+		resp, err := client.Get(fmt.Sprintf("%s/databases/%d/schemas", serverURL, mysqlDatabaseID))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("failed to open mysql schemas: status %v", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(body), mysqlDBName) {
+			t.Errorf("expected '%s' in mysql schema page: %s", mysqlDBName, string(body))
+		}
+
+		resp, err = client.Get(fmt.Sprintf("%s/databases/%d/schemas/%s/tables", serverURL, mysqlDatabaseID, mysqlDBName))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("failed to open mysql tables: status %v", resp.StatusCode)
+		}
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(body), "e2e_orders") {
+			t.Errorf("expected 'e2e_orders' in mysql tables page: %s", string(body))
+		}
+
+		resp, err = client.Get(fmt.Sprintf("%s/databases/%d/schemas/%s/tables/e2e_orders", serverURL, mysqlDatabaseID, mysqlDBName))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("failed to open mysql table details: status %v", resp.StatusCode)
+		}
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(body), "order_no") || !strings.Contains(string(body), "PRIMARY KEY") {
+			t.Errorf("expected table info in mysql details: %s", string(body))
 		}
 	})
 

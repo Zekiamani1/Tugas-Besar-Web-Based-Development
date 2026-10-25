@@ -150,8 +150,6 @@ func (s *Service) ExecuteMigration(ctx context.Context, targetDBID, migrationID 
 		if conn == nil {
 			return s.recordFailure(meta, &record, executedBy, errors.New("target connection is nil"), &executionErr)
 		}
-		// DB management currently returns a new sql.DB for each call.
-		defer conn.Close()
 
 		targetTx, err := conn.BeginTx(ctx, nil)
 		if err != nil {

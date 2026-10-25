@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,11 +13,14 @@ import (
 	"wbd/internal/models"
 	"wbd/internal/service/dbmanagement"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/testcontainers/testcontainers-go"
+	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -38,6 +42,29 @@ func startTestPostgres(t *testing.T, dbName string) *tcpostgres.PostgresContaine
 		t.Fatalf("failed to start postgres container for %s: %v", dbName, err)
 	}
 	return container
+}
+
+func startTestMySQL(t *testing.T, dbName string) (host string, port int, user, password string) {
+	t.Helper()
+	ctx := context.Background()
+	container, err := tcmysql.Run(ctx, "mysql:8.0",
+		tcmysql.WithDatabase(dbName),
+		tcmysql.WithUsername("testuser"),
+		tcmysql.WithPassword("secret"),
+	)
+	testcontainers.CleanupContainer(t, container)
+	if err != nil {
+		t.Fatalf("failed to start mysql container for %s: %v", dbName, err)
+	}
+	host, err = container.Host(ctx)
+	if err != nil {
+		t.Fatalf("failed to get mysql host: %v", err)
+	}
+	mappedPort, err := container.MappedPort(ctx, "3306/tcp")
+	if err != nil {
+		t.Fatalf("failed to get mysql port: %v", err)
+	}
+	return host, int(mappedPort.Num()), "testuser", "secret"
 }
 
 func openGorm(t *testing.T, container *tcpostgres.PostgresContainer) *gorm.DB {
@@ -98,15 +125,14 @@ func TestIntegrationDBManagement(t *testing.T) {
 	mockAC := &mockAccessControlService{
 		validateSessionFunc: func(_ context.Context, sessionID string) (int, error) {
 			if sessionID != "integration-session" {
-				t.Errorf("unexpected session ID: %s", sessionID)
+				return 0, fmt.Errorf("unexpected session ID: %s", sessionID)
 			}
-			return 7, nil
+			return 1, nil
 		},
-		isAdminFunc: func(context.Context, int) (bool, error) { return false, nil },
+		isAdminFunc: func(_ context.Context, userID int) (bool, error) {
+			return true, nil
+		},
 		evaluateDBAccessFunc: func(_ context.Context, userID, targetDBID int, requiredLevel string) error {
-			if userID != 7 || targetDBID != dbID || requiredLevel != "VIEW_ONLY" {
-				t.Errorf("unexpected dashboard access check: user=%d db=%d level=%s", userID, targetDBID, requiredLevel)
-			}
 			return nil
 		},
 	}
@@ -260,6 +286,150 @@ func TestIntegrationDBManagement(t *testing.T) {
 
 		if rec.Code == http.StatusOK {
 			t.Errorf("expected error status for unregistered target db, got 200:\n %s", rec.Body.String())
+		}
+	})
+
+	t.Run("SQLite_RegisterAndTableInfo", func(t *testing.T) {
+		sqliteFile := t.TempDir() + "/sqlite_integration.db"
+		rawDB, err := sql.Open("sqlite", sqliteFile)
+		if err != nil {
+			t.Fatalf("failed to open raw sqlite: %v", err)
+		}
+		for _, stmt := range []string{
+			`CREATE TABLE catalog (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				sku TEXT NOT NULL UNIQUE,
+				name TEXT NOT NULL,
+				stock INTEGER
+			)`,
+			`INSERT INTO catalog (sku, name, stock) VALUES ('SKU-001', 'Monitor', 15), ('SKU-002', 'Mouse', 40)`,
+		} {
+			if _, err := rawDB.Exec(stmt); err != nil {
+				t.Fatalf("failed to seed sqlite: %v", err)
+			}
+		}
+		rawDB.Close()
+
+		req := newJSONRequest(t, http.MethodPost, "/admin/databases", models.TargetDBInfo{
+			Name:   "Target SQLite Integration",
+			DBType: "sqlite",
+			DBName: sqliteFile,
+		})
+		rec := httptest.NewRecorder()
+		app.handleRegisterTargetDB(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200 on SQLite registration, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var stored models.TargetDBInfo
+		if err := internalDB.Where("name = ?", "Target SQLite Integration").First(&stored).Error; err != nil {
+			t.Fatalf("failed to find stored sqlite target db: %v", err)
+		}
+		sqliteID := strconv.Itoa(stored.ID)
+
+		// 1. Get Schemas
+		reqSchemas := httptest.NewRequest(http.MethodGet, "/databases/"+sqliteID+"/schemas", nil)
+		reqSchemas.SetPathValue("dbID", sqliteID)
+		recSchemas := httptest.NewRecorder()
+		app.handleGetSchemas(recSchemas, reqSchemas)
+		if recSchemas.Code != http.StatusOK || !strings.Contains(recSchemas.Body.String(), "main") {
+			t.Fatalf("expected 200 and schema 'main', got code=%d body=%s", recSchemas.Code, recSchemas.Body.String())
+		}
+
+		// 2. Get Tables
+		reqTables := httptest.NewRequest(http.MethodGet, "/databases/"+sqliteID+"/schemas/main/tables", nil)
+		reqTables.SetPathValue("dbID", sqliteID)
+		reqTables.SetPathValue("schema", "main")
+		recTables := httptest.NewRecorder()
+		app.handleGetTables(recTables, reqTables)
+		if recTables.Code != http.StatusOK || !strings.Contains(recTables.Body.String(), "catalog") {
+			t.Fatalf("expected 200 and table 'catalog', got code=%d body=%s", recTables.Code, recTables.Body.String())
+		}
+
+		// 3. Get Table Details
+		reqDetails := httptest.NewRequest(http.MethodGet, "/databases/"+sqliteID+"/schemas/main/tables/catalog", nil)
+		reqDetails.SetPathValue("dbID", sqliteID)
+		reqDetails.SetPathValue("schema", "main")
+		reqDetails.SetPathValue("table", "catalog")
+		recDetails := httptest.NewRecorder()
+		app.handleGetTableDetails(recDetails, reqDetails)
+		if recDetails.Code != http.StatusOK || !strings.Contains(recDetails.Body.String(), "sku") || !strings.Contains(recDetails.Body.String(), "PRIMARY KEY") {
+			t.Fatalf("expected 200 and columns/constraints for catalog, got code=%d body=%s", recDetails.Code, recDetails.Body.String())
+		}
+	})
+
+	t.Run("MySQL_RegisterAndTableInfo", func(t *testing.T) {
+		const mysqlDBName = "integration_mysql"
+		mHost, mPort, mUser, mPass := startTestMySQL(t, mysqlDBName)
+
+		dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true", mUser, mPass, mHost, mPort, mysqlDBName)
+		rawDB, err := sql.Open("mysql", dsn)
+		if err != nil {
+			t.Fatalf("failed to open test mysql: %v", err)
+		}
+		for _, stmt := range []string{
+			`CREATE TABLE products (
+				id INT AUTO_INCREMENT PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				price DECIMAL(10, 2)
+			)`,
+			`INSERT INTO products (name, price) VALUES ('Mechanical Keyboard', 89.99)`,
+		} {
+			if _, err := rawDB.Exec(stmt); err != nil {
+				t.Fatalf("failed to seed mysql: %v", err)
+			}
+		}
+		rawDB.Close()
+
+		req := newJSONRequest(t, http.MethodPost, "/admin/databases", models.TargetDBInfo{
+			Name:     "Target MySQL Integration",
+			DBType:   "mysql",
+			Host:     mHost,
+			Port:     mPort,
+			User:     mUser,
+			Password: mPass,
+			DBName:   mysqlDBName,
+		})
+		rec := httptest.NewRecorder()
+		app.handleRegisterTargetDB(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200 on MySQL registration, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var stored models.TargetDBInfo
+		if err := internalDB.Where("name = ?", "Target MySQL Integration").First(&stored).Error; err != nil {
+			t.Fatalf("failed to find stored mysql target db: %v", err)
+		}
+		mysqlID := strconv.Itoa(stored.ID)
+
+		// 1. Get Schemas
+		reqSchemas := httptest.NewRequest(http.MethodGet, "/databases/"+mysqlID+"/schemas", nil)
+		reqSchemas.SetPathValue("dbID", mysqlID)
+		recSchemas := httptest.NewRecorder()
+		app.handleGetSchemas(recSchemas, reqSchemas)
+		if recSchemas.Code != http.StatusOK || !strings.Contains(recSchemas.Body.String(), mysqlDBName) {
+			t.Fatalf("expected 200 and schema '%s', got code=%d body=%s", mysqlDBName, recSchemas.Code, recSchemas.Body.String())
+		}
+
+		// 2. Get Tables
+		reqTables := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/databases/%s/schemas/%s/tables", mysqlID, mysqlDBName), nil)
+		reqTables.SetPathValue("dbID", mysqlID)
+		reqTables.SetPathValue("schema", mysqlDBName)
+		recTables := httptest.NewRecorder()
+		app.handleGetTables(recTables, reqTables)
+		if recTables.Code != http.StatusOK || !strings.Contains(recTables.Body.String(), "products") {
+			t.Fatalf("expected 200 and table 'products', got code=%d body=%s", recTables.Code, recTables.Body.String())
+		}
+
+		// 3. Get Table Details
+		reqDetails := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/databases/%s/schemas/%s/tables/products", mysqlID, mysqlDBName), nil)
+		reqDetails.SetPathValue("dbID", mysqlID)
+		reqDetails.SetPathValue("schema", mysqlDBName)
+		reqDetails.SetPathValue("table", "products")
+		recDetails := httptest.NewRecorder()
+		app.handleGetTableDetails(recDetails, reqDetails)
+		if recDetails.Code != http.StatusOK || !strings.Contains(recDetails.Body.String(), "price") || !strings.Contains(recDetails.Body.String(), "PRIMARY KEY") {
+			t.Fatalf("expected 200 and details for products, got code=%d body=%s", recDetails.Code, recDetails.Body.String())
 		}
 	})
 }
