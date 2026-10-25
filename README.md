@@ -8,7 +8,7 @@
 
 ## Deskripsi
 
-Database Manager adalah aplikasi web untuk mengelola akses ke database target bersama (mendukung PostgreSQL, MySQL, dan SQLite). Platform Admin dapat mengatur pengguna, group, koneksi database, dan izin group. Pengguna dapat menjelajahi database yang diizinkan serta membuat, meninjau, dan menjalankan migration.
+Database Manager adalah aplikasi web untuk mengelola akses ke database target bersama (PostgreSQL, MySQL, dan SQLite). Platform Admin dapat mengatur pengguna, group, koneksi database, dan izin group. Pengguna dapat menjelajahi database yang diizinkan serta membuat, meninjau, dan menjalankan migration.
 
 ## Fitur
 
@@ -76,4 +76,10 @@ docker compose up --build
 
 Buka [http://localhost:8080](http://localhost:8080), lalu login menggunakan `ADMIN_USERNAME` dan `ADMIN_PASSWORD` dari `.env`. Port host dapat diubah melalui `APP_PORT`.
 
-Saat mendaftarkan database target melalui Admin Panel, pilih tipe database. Untuk PostgreSQL dan MySQL, gunakan host dan port yang dapat dijangkau oleh container aplikasi. Untuk SQLite, isi path file database pada field `db_name` (host, port, user, dan password dapat dikosongkan). Untuk menghentikan aplikasi, tekan `Ctrl+C`. Data PostgreSQL internal disimpan dalam Docker volume.
+Saat mendaftarkan PostgreSQL atau MySQL melalui Admin Panel, gunakan host dan port yang dapat dijangkau oleh container aplikasi.
+
+### Batasan pendaftaran SQLite
+
+Backend menerima database SQLite dengan path file pada field `db_name`, tanpa host, port, user, atau password. Namun, form Admin saat ini mewajibkan semua kolom koneksi tersebut, sehingga SQLite **belum dapat didaftarkan melalui antarmuka browser**. Pendaftaran SQLite hanya dapat dilakukan melalui request JSON ke `POST /admin/databases` oleh Platform Admin yang sudah login. Jangan mengisi nilai koneksi palsu pada form sebagai jalan pintas.
+
+Untuk menghentikan aplikasi, tekan `Ctrl+C`. Data PostgreSQL internal disimpan dalam Docker volume.
