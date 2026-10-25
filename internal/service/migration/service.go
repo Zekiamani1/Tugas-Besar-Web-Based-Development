@@ -38,7 +38,6 @@ func NewService(internalDB *gorm.DB, dbMgmt interfaces.DBManagementService) *Ser
 	}
 }
 
-// Initialize creates the internal history table and prevents duplicate applied versions for the same target database. Call this once during application startup.
 func (s *Service) Initialize(ctx context.Context) error {
 	if err := s.internalDB.WithContext(ctx).AutoMigrate(&models.MigrationRecord{}); err != nil {
 		return err
@@ -114,8 +113,57 @@ func (s *Service) GetLinearHistory(ctx context.Context, targetDBID int) ([]model
 	return records, err
 }
 
-// ExecuteMigration expects executedBy to come from a validated server-side session.
-// The internal PostgreSQL advisory lock serializes migrations per target database.
+func (s *Service) ExplainMigration(ctx context.Context, targetDBID, migrationID int) (string, error) {
+	if targetDBID <= 0 || migrationID <= 0 {
+		return "", ErrInvalidMigration
+	}
+
+	var record models.MigrationRecord
+	err := s.internalDB.WithContext(ctx).
+		Where("id = ? AND target_db_id = ? AND status = ?", migrationID, targetDBID, StatusDraft).
+		First(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", ErrDraftNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("find migration draft for explain: %w", err)
+	}
+
+	conn, err := s.dbMgmt.GetTargetConnection(ctx, targetDBID)
+	if err != nil {
+		return "", fmt.Errorf("connect to target database for explain: %w", err)
+	}
+	if conn == nil {
+		return "", errors.New("target database connection is nil")
+	}
+	defer conn.Close()
+
+	stmt, err := conn.PrepareContext(ctx, "EXPLAIN "+record.SQLQuery)
+	if err != nil {
+		return "", fmt.Errorf("prepare migration query plan: %w", err)
+	}
+	defer stmt.Close()
+
+	rows, err := stmt.QueryContext(ctx)
+	if err != nil {
+		return "", fmt.Errorf("query migration plan: %w", err)
+	}
+	defer rows.Close()
+
+	var planLines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			return "", fmt.Errorf("read migration query plan: %w", err)
+		}
+		planLines = append(planLines, line)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("read migration query plan: %w", err)
+	}
+	return strings.Join(planLines, "\n"), nil
+}
+
 func (s *Service) ExecuteMigration(ctx context.Context, targetDBID, migrationID int, executedBy string) (*models.MigrationRecord, error) {
 	if targetDBID <= 0 || migrationID <= 0 || strings.TrimSpace(executedBy) == "" {
 		return nil, ErrInvalidMigration

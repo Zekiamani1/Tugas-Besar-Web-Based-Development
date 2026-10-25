@@ -127,7 +127,7 @@ func TestMigrationAppIntegration(t *testing.T) {
 	viewerCookie := login("viewer")
 	editorCookie := login("editor")
 	basePath := fmt.Sprintf("/databases/%d/migrations", targetID)
-	sqlQuery := "CREATE TABLE migration_app_example (id integer PRIMARY KEY)"
+	sqlQuery := "SELECT count(*) FROM generate_series(1, 100)"
 	createForm := url.Values{"sql_query": {sqlQuery}}.Encode()
 
 	if rec := request(http.MethodPost, basePath, createForm, nil); rec.Code != http.StatusUnauthorized {
@@ -149,6 +149,20 @@ func TestMigrationAppIntegration(t *testing.T) {
 	}
 	if rec := request(http.MethodGet, basePath, "", viewerCookie); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), fmt.Sprintf("Draft #%d", migrationID)) {
 		t.Fatalf("viewer can see an editable draft: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	explainPath := fmt.Sprintf("%s/%d/explain", basePath, migrationID)
+	if rec := request(http.MethodPost, explainPath, "", viewerCookie); rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer explain: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := request(http.MethodPost, explainPath, "", editorCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Function Scan") {
+		t.Fatalf("editor explain: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Restore a DDL query so the existing execute flow verifies a real schema change.
+	ddlForm := url.Values{"sql_query": {"CREATE TABLE migration_app_example (id integer PRIMARY KEY)"}}.Encode()
+	if rec := request(http.MethodPost, fmt.Sprintf("%s/%d/edit", basePath, migrationID), ddlForm, editorCookie); rec.Code != http.StatusSeeOther {
+		t.Fatalf("restore DDL draft: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
 	executePath := fmt.Sprintf("%s/%d/execute", basePath, migrationID)

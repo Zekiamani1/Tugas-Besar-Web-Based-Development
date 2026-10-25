@@ -88,6 +88,7 @@ func NewAppWithConfig(
 	app.Handle("POST /databases/{dbID}/migrations", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleCreateMigrationDraft, app.sessionCookieSecure))
 	app.Handle("PUT /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/edit", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft, app.sessionCookieSecure))
+	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/explain", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleExplainMigration, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/execute", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleExecuteMigration, app.sessionCookieSecure))
 
 	return app
@@ -775,6 +776,10 @@ func (app *App) handleGetMigrationDetail(w http.ResponseWriter, r *http.Request)
 }
 
 func (app *App) renderMigrationDetail(w http.ResponseWriter, r *http.Request, dbID, migrationID, status int, pageError, editedSQL string) {
+	app.renderMigrationDetailWithPlan(w, r, dbID, migrationID, status, pageError, editedSQL, "")
+}
+
+func (app *App) renderMigrationDetailWithPlan(w http.ResponseWriter, r *http.Request, dbID, migrationID, status int, pageError, editedSQL, explainPlan string) {
 	canEdit, err := app.migrationCanEdit(r, dbID)
 	if err != nil {
 		if errors.Is(err, accesscontrol.ErrInvalidSession) {
@@ -798,17 +803,43 @@ func (app *App) renderMigrationDetail(w http.ResponseWriter, r *http.Request, db
 	w.WriteHeader(status)
 	_ = tmpl.Execute(w, struct {
 		*models.MigrationRecord
-		CanEdit   bool
-		Error     string
-		EditedSQL string
-		CSRFToken string
+		CanEdit     bool
+		Error       string
+		EditedSQL   string
+		CSRFToken   string
+		ExplainPlan string
 	}{
 		MigrationRecord: detail,
 		CanEdit:         canEdit,
 		Error:           pageError,
 		EditedSQL:       editedSQL,
 		CSRFToken:       csrfTokenFromRequest(r),
+		ExplainPlan:     explainPlan,
 	})
+}
+
+func (app *App) handleExplainMigration(w http.ResponseWriter, r *http.Request) {
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	migrationID, err := strconv.Atoi(r.PathValue("migrationID"))
+	if err != nil {
+		http.Error(w, "invalid migrationID", http.StatusBadRequest)
+		return
+	}
+
+	plan, err := app.ExplainMigration(r.Context(), dbID, migrationID)
+	if err != nil {
+		app.renderMigrationDetailWithPlan(
+			w, r, dbID, migrationID, http.StatusOK,
+			"Query plan tidak dapat dibuat. Pastikan draft berisi query yang didukung PostgreSQL.",
+			"", "",
+		)
+		return
+	}
+	app.renderMigrationDetailWithPlan(w, r, dbID, migrationID, http.StatusOK, "", "", plan)
 }
 
 func (app *App) handleCreateMigrationDraft(w http.ResponseWriter, r *http.Request) {
