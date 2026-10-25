@@ -41,5 +41,6 @@ type MigrationService interface {
 	GetMigrationDetail(ctx context.Context, targetDBID, migrationID int) (*models.MigrationRecord, error)
 	GetDrafts(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error)
 	GetLinearHistory(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error)
+	ExplainMigration(ctx context.Context, targetDBID, migrationID int) (string, error)
 	ExecuteMigration(ctx context.Context, targetDBID, migrationID int, token string) (*models.MigrationRecord, error)
 }

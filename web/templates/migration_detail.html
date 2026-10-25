@@ -16,6 +16,14 @@
 		<button type="submit">Save Draft</button>
 	</form></section>
 
+	<section class="card"><h2>Query Plan</h2><p class="muted">Lihat estimasi rencana PostgreSQL. Query tidak dijalankan.</p>
+	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/explain">
+		<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+		<button type="submit">Lihat Query Plan</button>
+	</form>
+	{{if .ExplainPlan}}<pre class="sql-preview">{{.ExplainPlan}}</pre>{{end}}
+	</section>
+
 	<section class="card"><h2>Execute Migration</h2><p class="muted">SQL di atas akan dijalankan pada database target. Pastikan isinya sudah benar.</p>
 	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/execute" onsubmit="return confirm('Jalankan migration ini? Pastikan SQL sudah benar.')">
 		<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
