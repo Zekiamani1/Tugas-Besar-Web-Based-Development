@@ -24,6 +24,7 @@ const (
 )
 
 var (
+	ErrStaleRevision          = errors.New("migration draft no longer matches the approved revision")
 	ErrInvalidMigration       = errors.New("invalid migration")
 	ErrDraftNotFound          = errors.New("migration draft not found")
 	ErrDatabaseBusy           = errors.New("database has a running or uncertain migration")
@@ -126,27 +127,36 @@ func (s *Service) updateDraft(ctx context.Context, targetDBID, migrationID int, 
 
 func draftView(definition models.Migration) models.MigrationRecord {
 	return models.MigrationRecord{ID: definition.ID, TargetDBID: definition.TargetDBID,
-		SQLQuery: definition.SQLUp, Status: StatusDraft}
+		SQLQuery: definition.SQLUp, Status: StatusDraft, Revision: definition.Revision}
 }
 
 func executionView(execution models.MigrationExecution) models.MigrationRecord {
 	return models.MigrationRecord{ID: execution.MigrationID, ExecutionID: execution.ID,
+		Action: execution.Action, RevertsExecutionID: execution.RevertsExecutionID,
 		TargetDBID: execution.TargetDBID, Version: execution.Version,
 		SQLQuery: execution.SQLSnapshot, Status: execution.Status,
-		ExecutedBy: execution.ExecutedBy, ExecutedAt: execution.StartedAt}
+		ExecutedBy: execution.ExecutedBy, ExecutedAt: execution.StartedAt,
+		Revision: execution.MigrationRevision, FinishedAt: execution.FinishedAt}
+}
+
+// GetDefinition returns the SQL and revision to bind to an approval.
+func (s *Service) GetDefinition(ctx context.Context, targetDBID, migrationID int) (models.Migration, error) {
+	var definition models.Migration
+	if targetDBID <= 0 || migrationID <= 0 {
+		return definition, ErrInvalidMigration
+	}
+	err := s.internalDB.WithContext(ctx).
+		Where("id = ? AND target_db_id = ?", migrationID, targetDBID).First(&definition).Error
+	return definition, err
 }
 
 func (s *Service) GetMigrationDetail(ctx context.Context, targetDBID, migrationID int) (*models.MigrationRecord, error) {
-	if targetDBID <= 0 || migrationID <= 0 {
-		return nil, ErrInvalidMigration
-	}
-	var definition models.Migration
-	if err := s.internalDB.WithContext(ctx).
-		Where("id = ? AND target_db_id = ?", migrationID, targetDBID).First(&definition).Error; err != nil {
+	definition, err := s.GetDefinition(ctx, targetDBID, migrationID)
+	if err != nil {
 		return nil, err
 	}
 	var execution models.MigrationExecution
-	err := s.internalDB.WithContext(ctx).
+	err = s.internalDB.WithContext(ctx).
 		Where("migration_id = ? AND target_db_id = ?", migrationID, targetDBID).
 		Order("id DESC").Take(&execution).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -254,6 +264,23 @@ func (s *Service) ExplainMigration(ctx context.Context, targetDBID, migrationID 
 // uncertain reservation blocks further executions on that database, including
 // after a process restart. Recovery/reconciliation belongs to worker integration.
 func (s *Service) reserveApply(ctx context.Context, targetDBID, migrationID int, executedBy string) (models.MigrationExecution, int, error) {
+	return s.reserveApplyRevision(ctx, targetDBID, migrationID, 0, executedBy)
+}
+
+// ExecuteApprovedApply runs the exact draft revision approved by the caller.
+// The worker checks permissions and approval before calling this method.
+func (s *Service) ExecuteApprovedApply(ctx context.Context, targetDBID, migrationID, revision int, actor string) (*models.MigrationExecution, error) {
+	if targetDBID <= 0 || migrationID <= 0 || revision <= 0 || strings.TrimSpace(actor) == "" {
+		return nil, ErrInvalidMigration
+	}
+	execution, version, err := s.reserveApplyRevision(ctx, targetDBID, migrationID, revision, actor)
+	if err != nil {
+		return nil, err
+	}
+	return s.runAttempt(ctx, execution, version)
+}
+
+func (s *Service) reserveApplyRevision(ctx context.Context, targetDBID, migrationID, revision int, executedBy string) (models.MigrationExecution, int, error) {
 	return s.reserveAttempt(ctx, targetDBID, func(meta *gorm.DB) (models.MigrationExecution, int, error) {
 		var definition models.Migration
 		if err := unexecuted(meta).Where("id = ? AND target_db_id = ?", migrationID, targetDBID).
@@ -262,6 +289,9 @@ func (s *Service) reserveApply(ctx context.Context, targetDBID, migrationID int,
 				return models.MigrationExecution{}, 0, ErrDraftNotFound
 			}
 			return models.MigrationExecution{}, 0, err
+		}
+		if revision != 0 && revision != definition.Revision {
+			return models.MigrationExecution{}, 0, ErrStaleRevision
 		}
 		var lastVersion int
 		if err := meta.Model(&models.MigrationExecution{}).

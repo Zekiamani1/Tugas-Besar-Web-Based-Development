@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"gorm.io/gorm"
 	"html/template"
 	"mime"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"wbd/internal/middleware"
+
 	"wbd/internal/models"
 	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/interfaces"
@@ -24,10 +26,12 @@ type App struct {
 	interfaces.MigrationService
 	*http.ServeMux
 	sessionCookieSecure bool
+	migrationApproval   interfaces.MigrationApproval
 }
 
 type CookieConfig struct {
-	Secure bool
+	MigrationApproval interfaces.MigrationApproval
+	Secure            bool
 }
 
 func (app *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +66,7 @@ func NewAppWithConfig(
 		MigrationService:     migSvc,
 		ServeMux:             http.NewServeMux(),
 		sessionCookieSecure:  config.Secure,
+		migrationApproval:    config.MigrationApproval,
 	}
 	app.HandleFunc("GET /{$}", app.handleHome)
 	app.HandleFunc("GET /static/app.css", func(w http.ResponseWriter, r *http.Request) {
@@ -86,11 +91,16 @@ func NewAppWithConfig(
 	app.Handle("GET /databases/{dbID}/schemas/{schema}/tables/{table}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetTableDetails, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/schemas/{schema}/tables/{table}/data", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetTableData, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migrations", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationHistory, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/migrations/drafts", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleGetMigrationDraftsJSON, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/migrations/history", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationHistoryJSON, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/migrations/position", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationPosition, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationDetail, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/migrations/{migrationID}/definition", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationDefinition, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleCreateMigrationDraft, app.sessionCookieSecure))
 	app.Handle("PUT /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/edit", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/explain", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleExplainMigration, app.sessionCookieSecure))
+	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/submit", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleSubmitMigration, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/execute", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleExecuteMigration, app.sessionCookieSecure))
 
 	return app
@@ -716,6 +726,51 @@ func (app *App) handleGetMigrationHistory(w http.ResponseWriter, r *http.Request
 	app.renderMigrationHistory(w, r, dbID, http.StatusOK, "", "")
 }
 
+func (app *App) handleGetMigrationDraftsJSON(w http.ResponseWriter, r *http.Request) {
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil || dbID <= 0 {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	drafts, err := app.GetDrafts(r.Context(), dbID)
+	if err != nil {
+		http.Error(w, "unable to read migration drafts", http.StatusInternalServerError)
+		return
+	}
+	type draftSummary struct {
+		MigrationID int    `json:"migration_id"`
+		Revision    int    `json:"revision"`
+		SQLUp       string `json:"sql_up"`
+	}
+	result := make([]draftSummary, 0, len(drafts))
+	for _, draft := range drafts {
+		result = append(result, draftSummary{MigrationID: draft.ID, Revision: draft.Revision, SQLUp: draft.SQLQuery})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+func (app *App) handleGetMigrationHistoryJSON(w http.ResponseWriter, r *http.Request) {
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil || dbID <= 0 {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	history, err := app.GetLinearHistory(r.Context(), dbID)
+	if err != nil {
+		http.Error(w, "unable to read migration history", http.StatusInternalServerError)
+		return
+	}
+	if r.URL.Query().Get("hide_rollback") == "true" {
+		history = migration.HideRollbackPairs(history)
+	}
+	if history == nil {
+		history = []models.MigrationRecord{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(history)
+}
+
 func (app *App) renderMigrationHistory(w http.ResponseWriter, r *http.Request, dbID, status int, pageError, draftSQL string) {
 	canEdit, err := app.migrationCanEdit(r, dbID)
 	if err != nil {
@@ -730,6 +785,10 @@ func (app *App) renderMigrationHistory(w http.ResponseWriter, r *http.Request, d
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	hideRollback := r.URL.Query().Get("hide_rollback") == "true"
+	if hideRollback {
+		history = migration.HideRollbackPairs(history)
 	}
 	var drafts []models.MigrationRecord
 	if canEdit {
@@ -747,22 +806,73 @@ func (app *App) renderMigrationHistory(w http.ResponseWriter, r *http.Request, d
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = tmpl.Execute(w, struct {
-		DBID       int
-		Migrations []models.MigrationRecord
-		Drafts     []models.MigrationRecord
-		CanEdit    bool
-		Error      string
-		DraftSQL   string
-		CSRFToken  string
+		DBID         int
+		Migrations   []models.MigrationRecord
+		HideRollback bool
+		Drafts       []models.MigrationRecord
+		CanEdit      bool
+		Error        string
+		DraftSQL     string
+		CSRFToken    string
 	}{
-		DBID:       dbID,
-		Migrations: history,
-		Drafts:     drafts,
-		CanEdit:    canEdit,
-		Error:      pageError,
-		DraftSQL:   draftSQL,
-		CSRFToken:  csrfTokenFromRequest(r),
+		DBID:         dbID,
+		Migrations:   history,
+		HideRollback: hideRollback,
+		Drafts:       drafts,
+		CanEdit:      canEdit,
+		Error:        pageError,
+		DraftSQL:     draftSQL,
+		CSRFToken:    csrfTokenFromRequest(r),
 	})
+}
+
+func (app *App) handleGetMigrationPosition(w http.ResponseWriter, r *http.Request) {
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil || dbID <= 0 {
+		http.Error(w, "invalid dbID", http.StatusBadRequest)
+		return
+	}
+	reader, ok := app.MigrationService.(interface {
+		GetPosition(context.Context, int) (migration.Position, error)
+	})
+	if !ok {
+		http.Error(w, "migration position unavailable", http.StatusInternalServerError)
+		return
+	}
+	position, err := reader.GetPosition(r.Context(), dbID)
+	if err != nil {
+		http.Error(w, "unable to read migration position", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(position)
+}
+
+func (app *App) handleGetMigrationDefinition(w http.ResponseWriter, r *http.Request) {
+	dbID, dbErr := strconv.Atoi(r.PathValue("dbID"))
+	migrationID, migrationErr := strconv.Atoi(r.PathValue("migrationID"))
+	if dbErr != nil || migrationErr != nil || dbID <= 0 || migrationID <= 0 {
+		http.Error(w, "invalid database or migration ID", http.StatusBadRequest)
+		return
+	}
+	reader, ok := app.MigrationService.(interface {
+		GetDefinition(context.Context, int, int) (models.Migration, error)
+	})
+	if !ok {
+		http.Error(w, "migration definition unavailable", http.StatusInternalServerError)
+		return
+	}
+	definition, err := reader.GetDefinition(r.Context(), dbID, migrationID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		http.Error(w, "migration not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "unable to read migration definition", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(definition)
 }
 
 func (app *App) handleGetMigrationDetail(w http.ResponseWriter, r *http.Request) {
@@ -807,18 +917,20 @@ func (app *App) renderMigrationDetailWithPlan(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(status)
 	_ = tmpl.Execute(w, struct {
 		*models.MigrationRecord
-		CanEdit     bool
-		Error       string
-		EditedSQL   string
-		CSRFToken   string
-		ExplainPlan string
+		CanEdit          bool
+		Error            string
+		EditedSQL        string
+		CSRFToken        string
+		ExplainPlan      string
+		ApprovalRequired bool
 	}{
-		MigrationRecord: detail,
-		CanEdit:         canEdit,
-		Error:           pageError,
-		EditedSQL:       editedSQL,
-		CSRFToken:       csrfTokenFromRequest(r),
-		ExplainPlan:     explainPlan,
+		MigrationRecord:  detail,
+		CanEdit:          canEdit,
+		Error:            pageError,
+		EditedSQL:        editedSQL,
+		CSRFToken:        csrfTokenFromRequest(r),
+		ExplainPlan:      explainPlan,
+		ApprovalRequired: app.migrationApproval != nil,
 	})
 }
 
@@ -1010,6 +1122,10 @@ func migrationSQLFromRequest(r *http.Request, legacySQL *string) (string, error)
 }
 
 func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {
+	if app.migrationApproval != nil {
+		http.Error(w, "submit this migration for approval before execution", http.StatusConflict)
+		return
+	}
 	dbID, err := strconv.Atoi(r.PathValue("dbID"))
 	if err != nil {
 		http.Error(w, "invalid dbID", http.StatusBadRequest)

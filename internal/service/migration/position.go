@@ -77,6 +77,39 @@ func (s *Service) GetActiveMigrations(ctx context.Context, targetDBID int) ([]mo
 	return position.active, err
 }
 
+type ExecutionReference struct {
+	ExecutionID int `json:"execution_id"`
+	MigrationID int `json:"migration_id"`
+	Revision    int `json:"revision"`
+}
+
+type Position struct {
+	ActiveHead  *ExecutionReference `json:"active_head"`
+	NextForward *ExecutionReference `json:"next_forward"`
+}
+
+func lastExecutionReference(stack []models.MigrationExecution) *ExecutionReference {
+	if len(stack) == 0 {
+		return nil
+	}
+	last := stack[len(stack)-1]
+	return &ExecutionReference{ExecutionID: last.ID, MigrationID: last.MigrationID, Revision: last.MigrationRevision}
+}
+
+func (s *Service) GetPosition(ctx context.Context, targetDBID int) (Position, error) {
+	if targetDBID <= 0 {
+		return Position{}, ErrInvalidMigration
+	}
+	position, err := loadPosition(s.internalDB.WithContext(ctx), targetDBID)
+	if err != nil {
+		return Position{}, err
+	}
+	return Position{
+		ActiveHead:  lastExecutionReference(position.active),
+		NextForward: lastExecutionReference(position.forward),
+	}, nil
+}
+
 // ExecuteReversal is called by the worker after permission and approval checks.
 // expectedExecutionID pins the approved active execution (rollback) or the
 // approved successful rollback (forward), preventing execution of stale jobs.

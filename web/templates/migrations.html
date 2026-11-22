@@ -22,11 +22,16 @@
 	</ul></section>
 	{{end}}
 
-	<section class="card"><h2>History</h2><ul class="item-list">
+	<section class="card"><h2>History</h2>
+	<form method="GET" action="/databases/{{.DBID}}/migrations">
+		<label><input type="checkbox" name="hide_rollback" value="true" {{if .HideRollback}}checked{{end}}> Hide rollback</label>
+		<button type="submit">Apply filter</button>
+	</form>
+	<ul class="item-list">
 	{{range .Migrations}}
 		<li>
 			<a href="/databases/{{$.DBID}}/migrations/{{.ID}}">Migration #{{.ID}}</a> <span class="status" data-status="{{.Status}}">{{.Status}}</span><br>
-			<span class="muted">Version: {{.Version}} · Executed by: {{.ExecutedBy}} · Executed at: {{.ExecutedAt}}</span>
+			<span class="muted">{{if .ExecutionID}}Execution #{{.ExecutionID}} · {{.Action}} · {{end}}Version: {{.Version}} · Executed by: {{.ExecutedBy}} · Executed at: {{.ExecutedAt}}</span>
 			<pre class="sql-preview">{{.SQLQuery}}</pre>
 		</li>
 	{{else}}

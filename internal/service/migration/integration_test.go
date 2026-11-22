@@ -365,3 +365,71 @@ func TestPersistedReservationBlocksSameDatabase(t *testing.T) {
 		t.Fatal("terminal attempt overwritten")
 	}
 }
+
+func TestRollbackForwardWithPostgres(t *testing.T) {
+	svc, _, db, schema := newPostgresService(t)
+	ctx := context.Background()
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	table := schema + ".reversible"
+	a, err := svc.CreateDraftDefinition(ctx, 1, models.MigrationDraft{
+		SQLUp: "CREATE TABLE " + table + " (id integer)", SQLDown: "DROP TABLE " + table,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := svc.CreateDraftDefinition(ctx, 1, models.MigrationDraft{
+		SQLUp:   "ALTER TABLE " + table + " ADD COLUMN note text",
+		SQLDown: "ALTER TABLE " + table + " DROP COLUMN note",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ExecuteApprovedApply(ctx, 1, a, 2, "alice"); !errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("stale approval accepted: %v", err)
+	}
+	appliedA, err := svc.ExecuteApprovedApply(ctx, 1, a, 1, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appliedB, err := svc.ExecuteApprovedApply(ctx, 1, b, 1, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ExecuteReversal(ctx, 1, a, appliedA.ID, ActionRollback, "alice"); !errors.Is(err, ErrInvalidPosition) {
+		t.Fatalf("rollback of non-head accepted: %v", err)
+	}
+	rolledBack, err := svc.ExecuteReversal(ctx, 1, b, appliedB.ID, ActionRollback, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkColumn := func(want bool) {
+		t.Helper()
+		var exists bool
+		err := db.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = $1 AND table_name = 'reversible' AND column_name = 'note'
+		)`, schema).Scan(&exists)
+		if err != nil || exists != want {
+			t.Fatalf("column exists=%t, want %t: %v", exists, want, err)
+		}
+	}
+	checkColumn(false)
+	forward, err := svc.ExecuteReversal(ctx, 1, b, rolledBack.ID, ActionForward, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkColumn(true)
+	if _, err := svc.ExecuteReversal(ctx, 1, b, appliedB.ID, ActionRollback, "alice"); !errors.Is(err, ErrInvalidPosition) {
+		t.Fatalf("stale rollback accepted: %v", err)
+	}
+	history, err := svc.GetLinearHistory(ctx, 1)
+	if err != nil || len(history) != 4 {
+		t.Fatalf("unexpected full history: %+v, %v", history, err)
+	}
+	filtered := HideRollbackPairs(history)
+	if len(filtered) != 2 || filtered[0].ExecutionID != appliedA.ID || filtered[1].ExecutionID != forward.ID {
+		t.Fatalf("unexpected filtered history: %+v", filtered)
+	}
+}

@@ -47,13 +47,13 @@ type MigrationDraft struct {
 
 // Migration stores the definition, independently of its execution history.
 type Migration struct {
-	ID                 int    `gorm:"primaryKey"`
-	TargetDBID         int    `gorm:"not null;index"`
-	Revision           int    `gorm:"not null;default:1"`
-	SQLUp              string `gorm:"not null"`
-	SQLDown            string
-	Irreversible       bool `gorm:"not null"`
-	IrreversibleReason string
+	ID                 int    `gorm:"primaryKey" json:"migration_id"`
+	TargetDBID         int    `gorm:"not null;index" json:"target_db_id"`
+	Revision           int    `gorm:"not null;default:1" json:"revision"`
+	SQLUp              string `gorm:"not null" json:"sql_up"`
+	SQLDown            string `json:"sql_down"`
+	Irreversible       bool `gorm:"not null" json:"irreversible"`
+	IrreversibleReason string `json:"irreversible_reason"`
 }
 
 // MigrationExecution stores one attempt. SQLSnapshot is the SQL used by that
@@ -79,14 +79,18 @@ type MigrationExecution struct {
 // MigrationRecord is the M1-compatible read view, not the writable migration
 // model. It also describes the archived migration_records table during import.
 type MigrationRecord struct {
-	ID          int
-	ExecutionID int
-	TargetDBID  int
-	Version     int
-	SQLQuery    string
-	ExecutedBy  string
-	Status      string
-	ExecutedAt  time.Time
+	ID                 int        `json:"migration_id"`
+	ExecutionID        int        `json:"execution_id"`
+	Action             string     `json:"action"`
+	Revision           int        `json:"revision"`
+	RevertsExecutionID *int       `json:"reverts_execution_id"`
+	TargetDBID         int        `json:"target_db_id"`
+	Version            int        `json:"version"`
+	SQLQuery           string     `json:"sql_snapshot"`
+	ExecutedBy         string     `json:"executed_by"`
+	Status             string     `json:"status"`
+	ExecutedAt         time.Time  `json:"started_at"`
+	FinishedAt         *time.Time `json:"finished_at"`
 }
 
 type User struct {

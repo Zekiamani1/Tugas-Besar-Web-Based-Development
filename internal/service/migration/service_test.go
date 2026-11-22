@@ -260,3 +260,19 @@ func TestValidateDraftReversibility(t *testing.T) {
 		})
 	}
 }
+
+func TestExecuteApprovedApplyRejectsStaleRevision(t *testing.T) {
+	svc, mock := newMockService(t, nil)
+	expectLock(mock)
+	mock.ExpectQuery(`SELECT count\(\*\) FROM "migration_executions"`).
+		WithArgs(2, StatusRunning, StatusUncertain).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`SELECT .*FROM "migrations"`).WithArgs(7, 2, 1).WillReturnRows(definitionRow())
+	mock.ExpectRollback()
+
+	if _, err := svc.ExecuteApprovedApply(context.Background(), 2, 7, 2, "alice"); !errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("expected stale revision error, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

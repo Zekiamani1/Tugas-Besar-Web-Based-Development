@@ -1200,3 +1200,72 @@ func TestMigrationHandlers(t *testing.T) {
 		}
 	})
 }
+
+func TestMigrationHistoryJSON(t *testing.T) {
+	original := 11
+	mockMig := &mockMigrationService{
+		getLinearHistoryFunc: func(_ context.Context, dbID int) ([]models.MigrationRecord, error) {
+			if dbID != 1 {
+				t.Fatalf("unexpected database ID: %d", dbID)
+			}
+			return []models.MigrationRecord{
+				{ID: 3, ExecutionID: original, Action: "APPLY", Status: "APPLIED"},
+				{ID: 3, ExecutionID: 12, Action: "ROLLBACK", Status: "APPLIED", RevertsExecutionID: &original},
+				{ID: 3, ExecutionID: 13, Action: "FORWARD", Status: "FAILED", Revision: 2, SQLQuery: "SELECT 1"},
+			}, nil
+		},
+	}
+	app := NewApp(nil, nil, mockMig)
+	req := httptest.NewRequest(http.MethodGet, "/databases/1/migrations/history?hide_rollback=true", nil)
+	req.SetPathValue("dbID", "1")
+	rec := httptest.NewRecorder()
+	app.handleGetMigrationHistoryJSON(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" ||
+		!strings.Contains(body, `"execution_id":13`) || !strings.Contains(body, `"revision":2`) ||
+		!strings.Contains(body, `"sql_snapshot":"SELECT 1"`) ||
+		strings.Contains(body, `"execution_id":11`) || strings.Contains(body, `"execution_id":12`) {
+		t.Fatalf("unexpected history response: %d %s", rec.Code, body)
+	}
+}
+
+func TestMigrationDraftsJSONRequiresEditAccess(t *testing.T) {
+	for _, canEdit := range []bool{false, true} {
+		mockAC := &mockAccessControlService{
+			validateSessionFunc: func(context.Context, string) (int, error) { return 7, nil },
+			evaluateDBAccessFunc: func(_ context.Context, userID, dbID int, level string) error {
+				if userID != 7 || dbID != 1 || level != accesscontrol.AccessLevelViewEdit {
+					t.Fatalf("unexpected access check: user=%d database=%d level=%s", userID, dbID, level)
+				}
+				if !canEdit {
+					return accesscontrol.ErrDBAccessDenied
+				}
+				return nil
+			},
+		}
+		mockMig := &mockMigrationService{
+			getDraftsFunc: func(_ context.Context, dbID int) ([]models.MigrationRecord, error) {
+				if !canEdit || dbID != 1 {
+					t.Fatalf("unexpected draft read: edit=%t database=%d", canEdit, dbID)
+				}
+				return []models.MigrationRecord{{ID: 4, Revision: 2, SQLQuery: "SELECT 1"}}, nil
+			},
+		}
+		app := NewApp(mockAC, nil, mockMig)
+		req := httptest.NewRequest(http.MethodGet, "/databases/1/migrations/drafts", nil)
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "session"})
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+
+		if !canEdit {
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("viewer response: %d %s", rec.Code, rec.Body.String())
+			}
+			continue
+		}
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" ||
+			strings.TrimSpace(rec.Body.String()) != `[{"migration_id":4,"revision":2,"sql_up":"SELECT 1"}]` {
+			t.Fatalf("editor response: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+}
