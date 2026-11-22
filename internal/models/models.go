@@ -37,14 +37,56 @@ type IndexInfo struct {
 	IsUnique bool
 }
 
+// MigrationDraft is the editable SQL definition supplied by a caller.
+type MigrationDraft struct {
+	SQLUp              string `json:"sql_up"`
+	SQLDown            string `json:"sql_down"`
+	Irreversible       bool   `json:"irreversible"`
+	IrreversibleReason string `json:"irreversible_reason"`
+}
+
+// Migration stores the definition, independently of its execution history.
+type Migration struct {
+	ID                 int    `gorm:"primaryKey"`
+	TargetDBID         int    `gorm:"not null;index"`
+	Revision           int    `gorm:"not null;default:1"`
+	SQLUp              string `gorm:"not null"`
+	SQLDown            string
+	Irreversible       bool `gorm:"not null"`
+	IrreversibleReason string
+}
+
+// MigrationExecution stores one attempt. SQLSnapshot is the SQL used by that
+// attempt, not a reference to the current migration definition.
+type MigrationExecution struct {
+	ID                 int       `gorm:"primaryKey"`
+	MigrationID        int       `gorm:"not null;index"`
+	MigrationRevision  int       `gorm:"not null"`
+	TargetDBID         int       `gorm:"not null;index"`
+	Action             string    `gorm:"not null"`
+	SQLSnapshot        string    `gorm:"not null"`
+	Version            int       `gorm:"not null;default:0"`
+	ExecutedBy         string    `gorm:"not null"`
+	Status             string    `gorm:"not null"`
+	StartedAt          time.Time `gorm:"not null"`
+	FinishedAt         *time.Time
+	Error              string
+	RevertsExecutionID *int
+	// Set only when importing an M1 record, so repeated initialization is safe.
+	LegacyMigrationID *int `gorm:"uniqueIndex"`
+}
+
+// MigrationRecord is the M1-compatible read view, not the writable migration
+// model. It also describes the archived migration_records table during import.
 type MigrationRecord struct {
-	ID         int
-	TargetDBID int
-	Version    int
-	SQLQuery   string
-	ExecutedBy string
-	Status     string
-	ExecutedAt time.Time
+	ID          int
+	ExecutionID int
+	TargetDBID  int
+	Version     int
+	SQLQuery    string
+	ExecutedBy  string
+	Status      string
+	ExecutedAt  time.Time
 }
 
 type User struct {

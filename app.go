@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"wbd/internal/models"
 	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/interfaces"
+	"wbd/internal/service/migration"
 )
 
 type App struct {
@@ -850,7 +852,19 @@ func (app *App) handleCreateMigrationDraft(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid dbID", http.StatusBadRequest)
 		return
 	}
-	sqlQuery, err := migrationSQLFromRequest(r)
+	var migrationID int
+	var legacySQL *string
+	if handled := app.handleDraftDefinitionJSON(w, r, &legacySQL, func(svc draftDefinitionService, draft models.MigrationDraft) error {
+		id, err := svc.CreateDraftDefinition(r.Context(), dbID, draft)
+		migrationID = id
+		return err
+	}); handled != draftDefinitionLegacy {
+		if handled == draftDefinitionSaved {
+			http.Redirect(w, r, fmt.Sprintf("/databases/%d/migrations/%d", dbID, migrationID), http.StatusSeeOther)
+		}
+		return
+	}
+	sqlQuery, err := migrationSQLFromRequest(r, legacySQL)
 	if err != nil {
 		if isFormRequest(r) {
 			app.renderMigrationHistory(w, r, dbID, http.StatusBadRequest, "SQL tidak dapat dibaca. Coba lagi.", "")
@@ -859,7 +873,7 @@ func (app *App) handleCreateMigrationDraft(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
-	migrationID, err := app.CreateDraft(r.Context(), dbID, sqlQuery)
+	migrationID, err = app.CreateDraft(r.Context(), dbID, sqlQuery)
 	if err != nil {
 		if isFormRequest(r) {
 			app.renderMigrationHistory(w, r, dbID, http.StatusInternalServerError, "Draft tidak dapat dibuat. Periksa SQL dan coba lagi.", sqlQuery)
@@ -882,7 +896,16 @@ func (app *App) handleUpdateMigrationDraft(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid migrationID", http.StatusBadRequest)
 		return
 	}
-	sqlQuery, err := migrationSQLFromRequest(r)
+	var legacySQL *string
+	if handled := app.handleDraftDefinitionJSON(w, r, &legacySQL, func(svc draftDefinitionService, draft models.MigrationDraft) error {
+		return svc.UpdateDraftDefinition(r.Context(), dbID, migrationID, draft)
+	}); handled != draftDefinitionLegacy {
+		if handled == draftDefinitionSaved {
+			http.Redirect(w, r, fmt.Sprintf("/databases/%d/migrations/%d", dbID, migrationID), http.StatusSeeOther)
+		}
+		return
+	}
+	sqlQuery, err := migrationSQLFromRequest(r, legacySQL)
 	if err != nil {
 		if isFormRequest(r) {
 			app.renderMigrationDetail(w, r, dbID, migrationID, http.StatusBadRequest, "SQL tidak dapat dibaca. Coba lagi.", "")
@@ -902,20 +925,80 @@ func (app *App) handleUpdateMigrationDraft(w http.ResponseWriter, r *http.Reques
 	http.Redirect(w, r, fmt.Sprintf("/databases/%d/migrations/%d", dbID, migrationID), http.StatusSeeOther)
 }
 
-func migrationSQLFromRequest(r *http.Request) (string, error) {
+type draftDefinitionService interface {
+	CreateDraftDefinition(context.Context, int, models.MigrationDraft) (int, error)
+	UpdateDraftDefinition(context.Context, int, int, models.MigrationDraft) error
+}
+
+type draftDefinitionResult int
+
+const (
+	draftDefinitionLegacy draftDefinitionResult = iota
+	draftDefinitionRejected
+	draftDefinitionSaved
+)
+
+func (app *App) handleDraftDefinitionJSON(w http.ResponseWriter, r *http.Request, legacySQL **string, save func(draftDefinitionService, models.MigrationDraft) error) draftDefinitionResult {
+	contentType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if contentType != "application/json" {
+		return draftDefinitionLegacy
+	}
+	var req struct {
+		SQLQuery           *string `json:"sql_query"`
+		SQLUp              *string `json:"sql_up"`
+		SQLDown            *string `json:"sql_down"`
+		Irreversible       *bool   `json:"irreversible"`
+		IrreversibleReason *string `json:"irreversible_reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return draftDefinitionRejected
+	}
+	if req.SQLQuery != nil && req.SQLUp == nil && req.SQLDown == nil && req.Irreversible == nil && req.IrreversibleReason == nil {
+		*legacySQL = req.SQLQuery
+		return draftDefinitionLegacy
+	}
+	if req.SQLQuery != nil || req.SQLUp == nil {
+		http.Error(w, "send sql_up with sql_down or an irreversible reason", http.StatusBadRequest)
+		return draftDefinitionRejected
+	}
+	draft := models.MigrationDraft{SQLUp: *req.SQLUp}
+	if req.SQLDown != nil {
+		draft.SQLDown = *req.SQLDown
+	}
+	if req.Irreversible != nil {
+		draft.Irreversible = *req.Irreversible
+	}
+	if req.IrreversibleReason != nil {
+		draft.IrreversibleReason = *req.IrreversibleReason
+	}
+	svc, ok := app.MigrationService.(draftDefinitionService)
+	if !ok {
+		http.Error(w, "migration definition service unavailable", http.StatusInternalServerError)
+		return draftDefinitionRejected
+	}
+	switch err := save(svc, draft); {
+	case err == nil:
+		return draftDefinitionSaved
+	case errors.Is(err, migration.ErrInvalidMigration):
+		http.Error(w, "provide SQL up and down, or mark irreversible and provide a reason", http.StatusBadRequest)
+	case errors.Is(err, migration.ErrDraftNotFound):
+		http.Error(w, "editable draft not found", http.StatusConflict)
+	default:
+		http.Error(w, "unable to save migration draft", http.StatusInternalServerError)
+	}
+	return draftDefinitionRejected
+}
+
+func migrationSQLFromRequest(r *http.Request, legacySQL *string) (string, error) {
+	if legacySQL != nil {
+		return *legacySQL, nil
+	}
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil {
 		return "", err
 	}
 	switch contentType {
-	case "application/json":
-		var req struct {
-			SQLQuery string `json:"sql_query"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			return "", err
-		}
-		return req.SQLQuery, nil
 	case "application/x-www-form-urlencoded":
 		if err := r.ParseForm(); err != nil {
 			return "", err

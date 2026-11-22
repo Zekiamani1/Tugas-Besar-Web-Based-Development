@@ -14,14 +14,19 @@ import (
 )
 
 const (
-	StatusDraft   = "DRAFT"
-	StatusApplied = "APPLIED"
-	StatusFailed  = "FAILED"
+	StatusDraft     = "DRAFT"
+	StatusApplied   = "APPLIED"
+	StatusFailed    = "FAILED"
+	StatusRunning   = "RUNNING"
+	StatusUncertain = "UNCERTAIN"
+	ActionApply     = "APPLY"
+	upOnlyReason    = "SQL down was not supplied by the M1 SQL-up-only interface."
 )
 
 var (
 	ErrInvalidMigration       = errors.New("invalid migration")
 	ErrDraftNotFound          = errors.New("migration draft not found")
+	ErrDatabaseBusy           = errors.New("database has a running or uncertain migration")
 	ErrTargetCommitUncertain  = errors.New("target commit could not be confirmed; inspect the target database before retrying")
 	ErrHistoryUpdateUncertain = errors.New("target migration committed but history update could not be confirmed; inspect the target database before retrying")
 )
@@ -38,79 +43,162 @@ func NewService(internalDB *gorm.DB, dbMgmt interfaces.DBManagementService) *Ser
 	}
 }
 
-func (s *Service) Initialize(ctx context.Context) error {
-	if err := s.internalDB.WithContext(ctx).AutoMigrate(&models.MigrationRecord{}); err != nil {
-		return err
-	}
-	return s.internalDB.WithContext(ctx).Exec(`CREATE UNIQUE INDEX IF NOT EXISTS migration_applied_version_unique
-		ON migration_records (target_db_id, version) WHERE version > 0`).Error
+// lockDatabase serializes draft changes and execution reservations across instances.
+func lockDatabase(db *gorm.DB, targetDBID int) error {
+	return db.Exec("SELECT pg_advisory_xact_lock(3110, ?)", targetDBID).Error
 }
 
+// CreateDraft preserves the SQL-up-only M1 API.
 func (s *Service) CreateDraft(ctx context.Context, targetDBID int, sqlQuery string) (int, error) {
-	if targetDBID <= 0 || strings.TrimSpace(sqlQuery) == "" {
+	return s.CreateDraftDefinition(ctx, targetDBID, models.MigrationDraft{
+		SQLUp: sqlQuery, Irreversible: true, IrreversibleReason: upOnlyReason,
+	})
+}
+
+func validateDraft(draft models.MigrationDraft) error {
+	hasDown := strings.TrimSpace(draft.SQLDown) != ""
+	hasReason := strings.TrimSpace(draft.IrreversibleReason) != ""
+	if strings.TrimSpace(draft.SQLUp) == "" ||
+		(draft.Irreversible && (hasDown || !hasReason)) ||
+		(!draft.Irreversible && (!hasDown || hasReason)) {
+		return ErrInvalidMigration
+	}
+	return nil
+}
+
+func (s *Service) CreateDraftDefinition(ctx context.Context, targetDBID int, draft models.MigrationDraft) (int, error) {
+	if targetDBID <= 0 || validateDraft(draft) != nil {
 		return 0, ErrInvalidMigration
 	}
-	record := models.MigrationRecord{
-		TargetDBID: targetDBID,
-		SQLQuery:   sqlQuery,
-		Status:     StatusDraft,
+	definition := models.Migration{
+		TargetDBID: targetDBID, Revision: 1, SQLUp: draft.SQLUp, SQLDown: draft.SQLDown,
+		Irreversible: draft.Irreversible, IrreversibleReason: strings.TrimSpace(draft.IrreversibleReason),
 	}
-	if err := s.internalDB.WithContext(ctx).Create(&record).Error; err != nil {
+	if err := s.internalDB.WithContext(ctx).Create(&definition).Error; err != nil {
 		return 0, err
 	}
-	return record.ID, nil
+	return definition.ID, nil
+}
+
+func unexecuted(db *gorm.DB) *gorm.DB {
+	return db.Where(`NOT EXISTS (SELECT 1 FROM migration_executions e WHERE e.migration_id = migrations.id)`)
 }
 
 func (s *Service) UpdateDraft(ctx context.Context, targetDBID, migrationID int, sqlQuery string) error {
 	if targetDBID <= 0 || migrationID <= 0 || strings.TrimSpace(sqlQuery) == "" {
 		return ErrInvalidMigration
 	}
-	result := s.internalDB.WithContext(ctx).Model(&models.MigrationRecord{}).
-		Where("id = ? AND target_db_id = ? AND status = ?", migrationID, targetDBID, StatusDraft).
-		Update("sql_query", sqlQuery)
-	if result.Error != nil {
-		return result.Error
+	return s.updateDraft(ctx, targetDBID, migrationID, map[string]any{"sql_up": sqlQuery}, true)
+}
+
+func (s *Service) UpdateDraftDefinition(ctx context.Context, targetDBID, migrationID int, draft models.MigrationDraft) error {
+	if targetDBID <= 0 || migrationID <= 0 || validateDraft(draft) != nil {
+		return ErrInvalidMigration
 	}
-	if result.RowsAffected == 0 {
-		return ErrDraftNotFound
-	}
-	return nil
+	return s.updateDraft(ctx, targetDBID, migrationID, map[string]any{
+		"sql_up": draft.SQLUp, "sql_down": draft.SQLDown, "irreversible": draft.Irreversible,
+		"irreversible_reason": strings.TrimSpace(draft.IrreversibleReason),
+	}, false)
+}
+
+func (s *Service) updateDraft(ctx context.Context, targetDBID, migrationID int, fields map[string]any, legacy bool) error {
+	fields["revision"] = gorm.Expr("revision + 1")
+	return s.internalDB.WithContext(ctx).Transaction(func(meta *gorm.DB) error {
+		if err := lockDatabase(meta, targetDBID); err != nil {
+			return err
+		}
+		query := unexecuted(meta.Model(&models.Migration{})).
+			Where("id = ? AND target_db_id = ?", migrationID, targetDBID)
+		if legacy {
+			// A legacy client cannot review or update the matching down SQL.
+			query = query.Where("irreversible AND COALESCE(sql_down, '') = ''")
+		}
+		result := query.Updates(fields)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrDraftNotFound
+		}
+		return nil
+	})
+}
+
+func draftView(definition models.Migration) models.MigrationRecord {
+	return models.MigrationRecord{ID: definition.ID, TargetDBID: definition.TargetDBID,
+		SQLQuery: definition.SQLUp, Status: StatusDraft}
+}
+
+func executionView(execution models.MigrationExecution) models.MigrationRecord {
+	return models.MigrationRecord{ID: execution.MigrationID, ExecutionID: execution.ID,
+		TargetDBID: execution.TargetDBID, Version: execution.Version,
+		SQLQuery: execution.SQLSnapshot, Status: execution.Status,
+		ExecutedBy: execution.ExecutedBy, ExecutedAt: execution.StartedAt}
 }
 
 func (s *Service) GetMigrationDetail(ctx context.Context, targetDBID, migrationID int) (*models.MigrationRecord, error) {
 	if targetDBID <= 0 || migrationID <= 0 {
 		return nil, ErrInvalidMigration
 	}
-	var record models.MigrationRecord
+	var definition models.Migration
+	if err := s.internalDB.WithContext(ctx).
+		Where("id = ? AND target_db_id = ?", migrationID, targetDBID).First(&definition).Error; err != nil {
+		return nil, err
+	}
+	var execution models.MigrationExecution
 	err := s.internalDB.WithContext(ctx).
-		Where("id = ? AND target_db_id = ?", migrationID, targetDBID).
-		First(&record).Error
+		Where("migration_id = ? AND target_db_id = ?", migrationID, targetDBID).
+		Order("id DESC").Take(&execution).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		view := draftView(definition)
+		return &view, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	return &record, nil
+	view := executionView(execution)
+	return &view, nil
 }
 
 func (s *Service) GetDrafts(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error) {
 	if targetDBID <= 0 {
 		return nil, ErrInvalidMigration
 	}
-	var drafts []models.MigrationRecord
-	err := s.internalDB.WithContext(ctx).
-		Where("target_db_id = ? AND status = ?", targetDBID, StatusDraft).
-		Order("id ASC").Find(&drafts).Error
-	return drafts, err
+	var definitions []models.Migration
+	if err := unexecuted(s.internalDB.WithContext(ctx)).
+		Where("target_db_id = ?", targetDBID).Order("id ASC").Find(&definitions).Error; err != nil {
+		return nil, err
+	}
+	views := make([]models.MigrationRecord, 0, len(definitions))
+	for _, definition := range definitions {
+		views = append(views, draftView(definition))
+	}
+	return views, nil
 }
 
-func (s *Service) GetLinearHistory(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error) {
+// GetExecutionHistory exposes complete attempts for future worker/SPA integration.
+func (s *Service) GetExecutionHistory(ctx context.Context, targetDBID int) ([]models.MigrationExecution, error) {
 	if targetDBID <= 0 {
 		return nil, ErrInvalidMigration
 	}
-	var records []models.MigrationRecord
-	err := s.internalDB.WithContext(ctx).
-		Where("target_db_id = ? AND status IN ?", targetDBID, []string{StatusApplied, StatusFailed}).
-		Order("executed_at ASC, id ASC").Find(&records).Error
-	return records, err
+	var executions []models.MigrationExecution
+	err := s.internalDB.WithContext(ctx).Where("target_db_id = ?", targetDBID).
+		Order("started_at ASC, id ASC").Find(&executions).Error
+	return executions, err
+}
+
+// GetLinearHistory keeps the existing M1 handlers working, but now returns one
+// view per execution, using its SQL snapshot rather than the definition's SQL.
+func (s *Service) GetLinearHistory(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error) {
+	executions, err := s.GetExecutionHistory(ctx, targetDBID)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]models.MigrationRecord, 0, len(executions))
+	for _, execution := range executions {
+		views = append(views, executionView(execution))
+	}
+	return views, nil
 }
 
 func (s *Service) ExplainMigration(ctx context.Context, targetDBID, migrationID int) (string, error) {
@@ -118,9 +206,9 @@ func (s *Service) ExplainMigration(ctx context.Context, targetDBID, migrationID 
 		return "", ErrInvalidMigration
 	}
 
-	var record models.MigrationRecord
-	err := s.internalDB.WithContext(ctx).
-		Where("id = ? AND target_db_id = ? AND status = ?", migrationID, targetDBID, StatusDraft).
+	var record models.Migration
+	err := unexecuted(s.internalDB.WithContext(ctx)).
+		Where("id = ? AND target_db_id = ?", migrationID, targetDBID).
 		First(&record).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", ErrDraftNotFound
@@ -136,7 +224,7 @@ func (s *Service) ExplainMigration(ctx context.Context, targetDBID, migrationID 
 	if conn == nil {
 		return "", errors.New("target database connection is nil")
 	}
-	stmt, err := conn.PrepareContext(ctx, "EXPLAIN "+record.SQLQuery)
+	stmt, err := conn.PrepareContext(ctx, "EXPLAIN "+record.SQLUp)
 	if err != nil {
 		return "", fmt.Errorf("prepare migration query plan: %w", err)
 	}
@@ -162,82 +250,137 @@ func (s *Service) ExplainMigration(ctx context.Context, targetDBID, migrationID 
 	return strings.Join(planLines, "\n"), nil
 }
 
+// reserveApply persists an attempt BEFORE contacting the target. A running or
+// uncertain reservation blocks further executions on that database, including
+// after a process restart. Recovery/reconciliation belongs to worker integration.
+func (s *Service) reserveApply(ctx context.Context, targetDBID, migrationID int, executedBy string) (models.MigrationExecution, int, error) {
+	return s.reserveAttempt(ctx, targetDBID, func(meta *gorm.DB) (models.MigrationExecution, int, error) {
+		var definition models.Migration
+		if err := unexecuted(meta).Where("id = ? AND target_db_id = ?", migrationID, targetDBID).
+			First(&definition).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return models.MigrationExecution{}, 0, ErrDraftNotFound
+			}
+			return models.MigrationExecution{}, 0, err
+		}
+		var lastVersion int
+		if err := meta.Model(&models.MigrationExecution{}).
+			Where("target_db_id = ? AND status = ?", targetDBID, StatusApplied).
+			Select("COALESCE(MAX(version), 0)").Scan(&lastVersion).Error; err != nil {
+			return models.MigrationExecution{}, 0, err
+		}
+		execution := models.MigrationExecution{
+			MigrationID: definition.ID, MigrationRevision: definition.Revision,
+			TargetDBID: targetDBID, Action: ActionApply, SQLSnapshot: definition.SQLUp,
+			ExecutedBy: executedBy, Status: StatusRunning, StartedAt: time.Now().UTC(),
+		}
+		return execution, lastVersion + 1, nil
+	})
+}
+
+func (s *Service) reserveAttempt(ctx context.Context, targetDBID int, build func(*gorm.DB) (models.MigrationExecution, int, error)) (models.MigrationExecution, int, error) {
+	var execution models.MigrationExecution
+	var nextVersion int
+	err := s.internalDB.WithContext(ctx).Transaction(func(meta *gorm.DB) error {
+		if err := lockDatabase(meta, targetDBID); err != nil {
+			return err
+		}
+		var active int64
+		if err := meta.Model(&models.MigrationExecution{}).
+			Where("target_db_id = ? AND status IN ?", targetDBID, []string{StatusRunning, StatusUncertain}).
+			Count(&active).Error; err != nil {
+			return err
+		}
+		if active > 0 {
+			return ErrDatabaseBusy
+		}
+		var err error
+		execution, nextVersion, err = build(meta)
+		if err != nil {
+			return err
+		}
+		return meta.Create(&execution).Error
+	})
+	return execution, nextVersion, err
+}
+
+// finishAttempt only finalizes a running attempt. Previously completed attempts
+// are never overwritten. Definition rows are not updated by execution.
+func (s *Service) finishAttempt(ctx context.Context, execution *models.MigrationExecution, status string, version int, cause error) error {
+	finishedAt := time.Now().UTC()
+	errorText := ""
+	if cause != nil {
+		errorText = cause.Error()
+	}
+	// The HTTP context may have been canceled by a disconnected client. Preserve
+	// the attempt's outcome with a separate, bounded metadata write.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	result := s.internalDB.WithContext(writeCtx).Model(&models.MigrationExecution{}).
+		Where("id = ? AND status = ?", execution.ID, StatusRunning).
+		Updates(map[string]any{"status": status, "version": version, "finished_at": finishedAt, "error": errorText})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("execution is no longer running")
+	}
+	execution.Status, execution.Version = status, version
+	execution.FinishedAt, execution.Error = &finishedAt, errorText
+	return nil
+}
+
 func (s *Service) ExecuteMigration(ctx context.Context, targetDBID, migrationID int, executedBy string) (*models.MigrationRecord, error) {
 	if targetDBID <= 0 || migrationID <= 0 || strings.TrimSpace(executedBy) == "" {
 		return nil, ErrInvalidMigration
 	}
-
-	var record models.MigrationRecord
-	var executionErr error
-	targetCommitted := false
-	err := s.internalDB.WithContext(ctx).Transaction(func(meta *gorm.DB) error {
-		if err := meta.Exec("SELECT pg_advisory_xact_lock(3110, ?)", targetDBID).Error; err != nil {
-			return err
-		}
-		if err := meta.Where("id = ? AND target_db_id = ? AND status = ?", migrationID, targetDBID, StatusDraft).
-			First(&record).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrDraftNotFound
-			}
-			return err
-		}
-
-		var lastVersion int
-		if err := meta.Model(&models.MigrationRecord{}).
-			Where("target_db_id = ? AND status = ?", targetDBID, StatusApplied).
-			Select("COALESCE(MAX(version), 0)").Scan(&lastVersion).Error; err != nil {
-			return err
-		}
-
-		conn, err := s.dbMgmt.GetTargetConnection(ctx, targetDBID)
-		if err != nil {
-			return s.recordFailure(meta, &record, executedBy, err, &executionErr)
-		}
-		if conn == nil {
-			return s.recordFailure(meta, &record, executedBy, errors.New("target connection is nil"), &executionErr)
-		}
-
-		targetTx, err := conn.BeginTx(ctx, nil)
-		if err != nil {
-			return s.recordFailure(meta, &record, executedBy, err, &executionErr)
-		}
-		if _, err := targetTx.ExecContext(ctx, record.SQLQuery); err != nil {
-			if rollbackErr := targetTx.Rollback(); rollbackErr != nil {
-				err = errors.Join(err, fmt.Errorf("rollback target migration: %w", rollbackErr))
-			}
-			return s.recordFailure(meta, &record, executedBy, err, &executionErr)
-		}
-		if err := targetTx.Commit(); err != nil {
-			// A commit error does not prove whether the target applied the SQL.
-			return fmt.Errorf("%w: %v", ErrTargetCommitUncertain, err)
-		}
-		targetCommitted = true
-
-		record.Version = lastVersion + 1
-		record.Status = StatusApplied
-		record.ExecutedBy = executedBy
-		record.ExecutedAt = time.Now().UTC()
-		return meta.Save(&record).Error
-	})
+	execution, nextVersion, err := s.reserveApply(ctx, targetDBID, migrationID, executedBy)
 	if err != nil {
-		if targetCommitted {
-			return nil, fmt.Errorf("%w: %v", ErrHistoryUpdateUncertain, err)
-		}
 		return nil, err
 	}
-	if executionErr != nil {
-		return &record, executionErr
+	result, err := s.runAttempt(ctx, execution, nextVersion)
+	if result == nil {
+		return nil, err
 	}
-	return &record, nil
+	view := executionView(*result)
+	return &view, err
 }
 
-func (s *Service) recordFailure(meta *gorm.DB, record *models.MigrationRecord, executedBy string, cause error, executionErr *error) error {
-	record.Status = StatusFailed
-	record.ExecutedBy = executedBy
-	record.ExecutedAt = time.Now().UTC()
-	if err := meta.Save(record).Error; err != nil {
-		return errors.Join(cause, fmt.Errorf("record failed migration: %w", err))
+func (s *Service) runAttempt(ctx context.Context, execution models.MigrationExecution, version int) (*models.MigrationExecution, error) {
+	fail := func(cause error) (*models.MigrationExecution, error) {
+		if err := s.finishAttempt(ctx, &execution, StatusFailed, 0, cause); err != nil {
+			return nil, errors.Join(cause, fmt.Errorf("record failed execution: %w", err))
+		}
+		return &execution, cause
 	}
-	*executionErr = cause
-	return nil
+	conn, err := s.dbMgmt.GetTargetConnection(ctx, execution.TargetDBID)
+	if err != nil {
+		return fail(err)
+	}
+	if conn == nil {
+		return fail(errors.New("target connection is nil"))
+	}
+	targetTx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fail(err)
+	}
+	if _, err := targetTx.ExecContext(ctx, execution.SQLSnapshot); err != nil {
+		if rollbackErr := targetTx.Rollback(); rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("rollback target migration: %w", rollbackErr))
+		}
+		return fail(err)
+	}
+	if err := targetTx.Commit(); err != nil {
+		// An error cannot prove the target did not commit. Keep a durable blocker.
+		uncertainErr := fmt.Errorf("%w: %v", ErrTargetCommitUncertain, err)
+		if saveErr := s.finishAttempt(ctx, &execution, StatusUncertain, 0, uncertainErr); saveErr != nil {
+			return nil, errors.Join(uncertainErr, saveErr)
+		}
+		return nil, uncertainErr
+	}
+	if err := s.finishAttempt(ctx, &execution, StatusApplied, version, nil); err != nil {
+		// The previously committed RUNNING reservation remains to block retries.
+		return nil, fmt.Errorf("%w: %v", ErrHistoryUpdateUncertain, err)
+	}
+	return &execution, nil
 }

@@ -177,14 +177,14 @@ func TestMigrationAppIntegration(t *testing.T) {
 	}
 
 	var editor models.User
-	var record models.MigrationRecord
+	var record models.MigrationExecution
 	if err := internalDB.Where("username = ?", "editor").First(&editor).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := internalDB.First(&record, migrationID).Error; err != nil {
+	if err := internalDB.Where("migration_id = ?", migrationID).First(&record).Error; err != nil {
 		t.Fatal(err)
 	}
-	if record.Status != migration.StatusApplied || record.Version != 1 || record.ExecutedBy != strconv.Itoa(editor.ID) || record.ExecutedAt.IsZero() {
+	if record.Status != migration.StatusApplied || record.Version != 1 || record.ExecutedBy != strconv.Itoa(editor.ID) || record.StartedAt.IsZero() {
 		t.Fatalf("unexpected migration history: %+v", record)
 	}
 	if rec := request(http.MethodGet, basePath, "", editorCookie); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), fmt.Sprintf("Draft #%d", migrationID)) {
