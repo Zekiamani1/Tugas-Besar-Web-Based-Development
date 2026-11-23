@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Migration Detail · Database Manager</title><link rel="stylesheet" href="/static/app.css"></head>
 <body>
 	<main class="page"><header class="page-header"><div><p class="eyebrow">Database #{{.TargetDBID}}</p><h1>Migration #{{.ID}}</h1></div><nav><a href="/databases/{{.TargetDBID}}/migrations">Back to Migrations</a></nav></header>
 	{{if .Error}}<p class="message error" role="alert">{{.Error}}</p>{{end}}
 	<section class="card"><p>Version: {{.Version}} · <span class="status" data-status="{{.Status}}">{{.Status}}</span></p>
-	{{if .ExecutedBy}}<p>ExecutedBy: {{.ExecutedBy}}{{if ne .Status "DRAFT"}} · ExecutedAt: {{.ExecutedAt}}{{end}}</p>{{end}}
+	{{if .ExecutedBy}}<p>Executed by: {{.ExecutedBy}}{{if ne .Status "DRAFT"}} · Executed at: {{.ExecutedAt}}{{end}}</p>{{end}}
 	<h2>SQL Query</h2><pre class="sql-preview">{{.SQLQuery}}</pre></section>
 
 	{{if and .CanEdit (eq .Status "DRAFT")}}
@@ -16,17 +16,17 @@
 		<button type="submit">Save Draft</button>
 	</form></section>
 
-	<section class="card"><h2>Query Plan</h2><p class="muted">Lihat estimasi rencana PostgreSQL. Query tidak dijalankan.</p>
+	<section class="card"><h2>Query Plan</h2><p class="muted">Preview the estimated PostgreSQL query plan without executing the query.</p>
 	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/explain">
 		<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-		<button type="submit">Lihat Query Plan</button>
+		<button type="submit">View Query Plan</button>
 	</form>
 	{{if .ExplainPlan}}<pre class="sql-preview">{{.ExplainPlan}}</pre>{{end}}
 	</section>
 
 	{{if not .ApprovalRequired}}
-	<section class="card"><h2>Execute Migration</h2><p class="muted">SQL di atas akan dijalankan pada database target. Pastikan isinya sudah benar.</p>
-	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/execute" onsubmit="return confirm('Jalankan migration ini? Pastikan SQL sudah benar.')">
+	<section class="card"><h2>Execute Migration</h2><p class="muted">Review the SQL before running it on the target database.</p>
+	<form method="POST" action="/databases/{{.TargetDBID}}/migrations/{{.ID}}/execute" onsubmit="return confirm('Run this migration on the target database?')">
 		<input type="hidden" name="_csrf" value="{{.CSRFToken}}">
 		<button class="button-danger" type="submit">Execute</button>
 	</form></section>

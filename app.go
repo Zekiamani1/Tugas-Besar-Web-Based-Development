@@ -950,7 +950,7 @@ func (app *App) handleExplainMigration(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		app.renderMigrationDetailWithPlan(
 			w, r, dbID, migrationID, http.StatusOK,
-			"Query plan tidak dapat dibuat. Pastikan draft berisi query yang didukung PostgreSQL.",
+			"Could not generate a query plan. Check that PostgreSQL supports the SQL in this draft.",
 			"", "",
 		)
 		return
@@ -979,7 +979,7 @@ func (app *App) handleCreateMigrationDraft(w http.ResponseWriter, r *http.Reques
 	sqlQuery, err := migrationSQLFromRequest(r, legacySQL)
 	if err != nil {
 		if isFormRequest(r) {
-			app.renderMigrationHistory(w, r, dbID, http.StatusBadRequest, "SQL tidak dapat dibaca. Coba lagi.", "")
+			app.renderMigrationHistory(w, r, dbID, http.StatusBadRequest, "Could not read the SQL. Try again.", "")
 		} else {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 		}
@@ -988,7 +988,7 @@ func (app *App) handleCreateMigrationDraft(w http.ResponseWriter, r *http.Reques
 	migrationID, err = app.CreateDraft(r.Context(), dbID, sqlQuery)
 	if err != nil {
 		if isFormRequest(r) {
-			app.renderMigrationHistory(w, r, dbID, http.StatusInternalServerError, "Draft tidak dapat dibuat. Periksa SQL dan coba lagi.", sqlQuery)
+			app.renderMigrationHistory(w, r, dbID, http.StatusInternalServerError, "Could not create the draft. Check the SQL and try again.", sqlQuery)
 		} else {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
@@ -1020,7 +1020,7 @@ func (app *App) handleUpdateMigrationDraft(w http.ResponseWriter, r *http.Reques
 	sqlQuery, err := migrationSQLFromRequest(r, legacySQL)
 	if err != nil {
 		if isFormRequest(r) {
-			app.renderMigrationDetail(w, r, dbID, migrationID, http.StatusBadRequest, "SQL tidak dapat dibaca. Coba lagi.", "")
+			app.renderMigrationDetail(w, r, dbID, migrationID, http.StatusBadRequest, "Could not read the SQL. Try again.", "")
 		} else {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 		}
@@ -1028,7 +1028,7 @@ func (app *App) handleUpdateMigrationDraft(w http.ResponseWriter, r *http.Reques
 	}
 	if err := app.UpdateDraft(r.Context(), dbID, migrationID, sqlQuery); err != nil {
 		if isFormRequest(r) {
-			app.renderMigrationDetail(w, r, dbID, migrationID, http.StatusInternalServerError, "Draft tidak dapat disimpan. Periksa SQL dan coba lagi.", sqlQuery)
+			app.renderMigrationDetail(w, r, dbID, migrationID, http.StatusInternalServerError, "Could not save the draft. Check the SQL and try again.", sqlQuery)
 		} else {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
@@ -1152,7 +1152,7 @@ func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := app.ExecuteMigration(r.Context(), dbID, migrationID, strconv.Itoa(userID)); err != nil {
 		if isFormRequest(r) {
-			app.renderMigrationDetail(w, r, dbID, migrationID, http.StatusInternalServerError, "Migration gagal dijalankan. Periksa SQL dan status database.", "")
+			app.renderMigrationDetail(w, r, dbID, migrationID, http.StatusInternalServerError, "Migration failed. Check the SQL and the target database status.", "")
 		} else {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}

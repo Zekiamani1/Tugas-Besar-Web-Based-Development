@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Migrations · Database Manager</title><link rel="stylesheet" href="/static/app.css"></head>
 <body>
 	<main class="page"><header class="page-header"><div><p class="eyebrow">Database #{{.DBID}}</p><h1>Migrations</h1></div><nav><a href="/dashboard">Dashboard</a><a href="/databases/{{.DBID}}/schemas">Schemas</a></nav></header>
@@ -35,7 +35,7 @@
 			<pre class="sql-preview">{{.SQLQuery}}</pre>
 		</li>
 	{{else}}
-		<li class="empty-state">Belum ada riwayat migration.</li>
+		<li class="empty-state">No migration history yet.</li>
 	{{end}}
 	</ul></section></main>
 </body>
