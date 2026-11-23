@@ -8,20 +8,14 @@ import (
 	"wbd/internal/models"
 )
 
-// Initialize upgrades storage atomically. The M1 table is retained as an archive;
-// subsequent reads and writes use only the separated tables. Stop old application
-// instances before upgrading: their writes to migration_records are unsupported.
 func (s *Service) Initialize(ctx context.Context) error {
 	return s.internalDB.WithContext(ctx).Transaction(func(meta *gorm.DB) error {
-		// Serialize schema upgrades across application instances.
 		if err := meta.Exec("SELECT pg_advisory_xact_lock(3110, 0)").Error; err != nil {
 			return err
 		}
 		if err := meta.AutoMigrate(&models.Migration{}, &models.MigrationExecution{}); err != nil {
 			return err
 		}
-		// A durable running/uncertain attempt protects the target even while no
-		// metadata transaction is open (and across application restarts).
 		if err := meta.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS migration_database_inflight_unique
 			ON migration_executions (target_db_id) WHERE status IN ('RUNNING', 'UNCERTAIN')`).Error; err != nil {
 			return err
@@ -56,8 +50,6 @@ func (s *Service) Initialize(ctx context.Context) error {
 			ON CONFLICT (legacy_migration_id) DO NOTHING`).Error; err != nil {
 			return err
 		}
-		// Imported IDs must not collide with newly created drafts. nextval keeps
-		// the sequence moving forward even if Initialize has already run before.
 		return meta.Exec(`SELECT setval(pg_get_serial_sequence('migrations', 'id'),
 			GREATEST(COALESCE((SELECT MAX(id) FROM migrations), 1),
 				nextval(pg_get_serial_sequence('migrations', 'id'))), TRUE)`).Error

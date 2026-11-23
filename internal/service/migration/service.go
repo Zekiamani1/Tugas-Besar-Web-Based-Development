@@ -44,12 +44,10 @@ func NewService(internalDB *gorm.DB, dbMgmt interfaces.DBManagementService) *Ser
 	}
 }
 
-// lockDatabase serializes draft changes and execution reservations across instances.
 func lockDatabase(db *gorm.DB, targetDBID int) error {
 	return db.Exec("SELECT pg_advisory_xact_lock(3110, ?)", targetDBID).Error
 }
 
-// CreateDraft preserves the SQL-up-only M1 API.
 func (s *Service) CreateDraft(ctx context.Context, targetDBID int, sqlQuery string) (int, error) {
 	return s.CreateDraftDefinition(ctx, targetDBID, models.MigrationDraft{
 		SQLUp: sqlQuery, Irreversible: true, IrreversibleReason: upOnlyReason,
@@ -111,7 +109,6 @@ func (s *Service) updateDraft(ctx context.Context, targetDBID, migrationID int, 
 		query := unexecuted(meta.Model(&models.Migration{})).
 			Where("id = ? AND target_db_id = ?", migrationID, targetDBID)
 		if legacy {
-			// A legacy client cannot review or update the matching down SQL.
 			query = query.Where("irreversible AND COALESCE(sql_down, '') = ''")
 		}
 		result := query.Updates(fields)
@@ -139,7 +136,6 @@ func executionView(execution models.MigrationExecution) models.MigrationRecord {
 		Revision: execution.MigrationRevision, FinishedAt: execution.FinishedAt}
 }
 
-// GetDefinition returns the SQL and revision to bind to an approval.
 func (s *Service) GetDefinition(ctx context.Context, targetDBID, migrationID int) (models.Migration, error) {
 	var definition models.Migration
 	if targetDBID <= 0 || migrationID <= 0 {
@@ -186,19 +182,16 @@ func (s *Service) GetDrafts(ctx context.Context, targetDBID int) ([]models.Migra
 	return views, nil
 }
 
-// GetExecutionHistory exposes complete attempts for future worker/SPA integration.
 func (s *Service) GetExecutionHistory(ctx context.Context, targetDBID int) ([]models.MigrationExecution, error) {
 	if targetDBID <= 0 {
 		return nil, ErrInvalidMigration
 	}
 	var executions []models.MigrationExecution
 	err := s.internalDB.WithContext(ctx).Where("target_db_id = ?", targetDBID).
-		Order("started_at ASC, id ASC").Find(&executions).Error
+		Order("started_at ASC, legacy_migration_id ASC NULLS LAST, id ASC").Find(&executions).Error
 	return executions, err
 }
 
-// GetLinearHistory keeps the existing M1 handlers working, but now returns one
-// view per execution, using its SQL snapshot rather than the definition's SQL.
 func (s *Service) GetLinearHistory(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error) {
 	executions, err := s.GetExecutionHistory(ctx, targetDBID)
 	if err != nil {
@@ -260,15 +253,10 @@ func (s *Service) ExplainMigration(ctx context.Context, targetDBID, migrationID 
 	return strings.Join(planLines, "\n"), nil
 }
 
-// reserveApply persists an attempt BEFORE contacting the target. A running or
-// uncertain reservation blocks further executions on that database, including
-// after a process restart. Recovery/reconciliation belongs to worker integration.
 func (s *Service) reserveApply(ctx context.Context, targetDBID, migrationID int, executedBy string) (models.MigrationExecution, int, error) {
 	return s.reserveApplyRevision(ctx, targetDBID, migrationID, 0, executedBy)
 }
 
-// ExecuteApprovedApply runs the exact draft revision approved by the caller.
-// The worker checks permissions and approval before calling this method.
 func (s *Service) ExecuteApprovedApply(ctx context.Context, targetDBID, migrationID, revision int, actor string) (*models.MigrationExecution, error) {
 	if targetDBID <= 0 || migrationID <= 0 || revision <= 0 || strings.TrimSpace(actor) == "" {
 		return nil, ErrInvalidMigration
@@ -334,16 +322,12 @@ func (s *Service) reserveAttempt(ctx context.Context, targetDBID int, build func
 	return execution, nextVersion, err
 }
 
-// finishAttempt only finalizes a running attempt. Previously completed attempts
-// are never overwritten. Definition rows are not updated by execution.
 func (s *Service) finishAttempt(ctx context.Context, execution *models.MigrationExecution, status string, version int, cause error) error {
 	finishedAt := time.Now().UTC()
 	errorText := ""
 	if cause != nil {
 		errorText = cause.Error()
 	}
-	// The HTTP context may have been canceled by a disconnected client. Preserve
-	// the attempt's outcome with a separate, bounded metadata write.
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	result := s.internalDB.WithContext(writeCtx).Model(&models.MigrationExecution{}).
@@ -401,7 +385,6 @@ func (s *Service) runAttempt(ctx context.Context, execution models.MigrationExec
 		return fail(err)
 	}
 	if err := targetTx.Commit(); err != nil {
-		// An error cannot prove the target did not commit. Keep a durable blocker.
 		uncertainErr := fmt.Errorf("%w: %v", ErrTargetCommitUncertain, err)
 		if saveErr := s.finishAttempt(ctx, &execution, StatusUncertain, 0, uncertainErr); saveErr != nil {
 			return nil, errors.Join(uncertainErr, saveErr)
@@ -409,7 +392,6 @@ func (s *Service) runAttempt(ctx context.Context, execution models.MigrationExec
 		return nil, uncertainErr
 	}
 	if err := s.finishAttempt(ctx, &execution, StatusApplied, version, nil); err != nil {
-		// The previously committed RUNNING reservation remains to block retries.
 		return nil, fmt.Errorf("%w: %v", ErrHistoryUpdateUncertain, err)
 	}
 	return &execution, nil

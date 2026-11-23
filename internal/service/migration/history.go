@@ -2,7 +2,6 @@ package migration
 
 import "wbd/internal/models"
 
-// HideRollbackPairs keeps the history order and leaves the input untouched.
 func HideRollbackPairs(history []models.MigrationRecord) []models.MigrationRecord {
 	applied := make(map[int]models.MigrationRecord)
 	for _, entry := range history {

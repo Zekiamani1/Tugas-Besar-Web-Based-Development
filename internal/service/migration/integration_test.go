@@ -179,7 +179,6 @@ func TestMigrationWithPostgres(t *testing.T) {
 	for _, migrationID := range []int{firstConcurrentID, secondConcurrentID} {
 		go func(id int) {
 			record, execErr := svc.ExecuteMigration(ctx, 1, id, "alice")
-			// The worker must retry a busy reservation, never execute concurrently.
 			deadline := time.Now().Add(5 * time.Second)
 			for errors.Is(execErr, ErrDatabaseBusy) && time.Now().Before(deadline) {
 				time.Sleep(5 * time.Millisecond)
@@ -234,7 +233,6 @@ func TestMigrationWithPostgres(t *testing.T) {
 func TestImportM1IsIdempotent(t *testing.T) {
 	svc, db, _, _ := newPostgresService(t)
 	ctx := context.Background()
-	// Build the exact old schema, without relying on the new compatibility DTO.
 	if err := db.Exec(`CREATE TABLE migration_records (
 		id BIGSERIAL PRIMARY KEY, target_db_id BIGINT, version BIGINT, sql_query TEXT,
 		executed_by TEXT, status TEXT, executed_at TIMESTAMPTZ)`).Error; err != nil {
@@ -297,7 +295,6 @@ func TestImportM1IsIdempotent(t *testing.T) {
 	if err := svc.UpdateDraft(ctx, 1, 42, "SELECT 0"); !errors.Is(err, ErrDraftNotFound) {
 		t.Fatalf("imported execution editable: %v", err)
 	}
-	// Changes to an imported draft survive subsequent startup imports.
 	if err := svc.UpdateDraft(ctx, 1, 41, "SELECT 100"); err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +333,6 @@ func TestPersistedReservationBlocksSameDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A newly constructed service sees the persisted reservation after restart.
 	restarted := NewService(db, svc.dbMgmt)
 	if err := restarted.Initialize(ctx); err != nil {
 		t.Fatal(err)
@@ -360,7 +356,6 @@ func TestPersistedReservationBlocksSameDatabase(t *testing.T) {
 	if _, err := restarted.ExecuteMigration(ctx, 2, otherID, "carol"); err != nil {
 		t.Fatalf("other database blocked: %v", err)
 	}
-	// A terminal history entry cannot be finalized a second time.
 	if err := restarted.finishAttempt(ctx, &attempt, StatusApplied, 1, nil); err == nil {
 		t.Fatal("terminal attempt overwritten")
 	}

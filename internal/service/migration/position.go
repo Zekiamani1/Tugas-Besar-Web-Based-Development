@@ -26,7 +26,6 @@ type migrationPosition struct {
 	forward []models.MigrationExecution
 }
 
-// replayPosition expects committed attempts in execution ID order.
 func replayPosition(history []models.MigrationExecution) (migrationPosition, error) {
 	var position migrationPosition
 	for _, attempt := range history {
@@ -110,9 +109,6 @@ func (s *Service) GetPosition(ctx context.Context, targetDBID int) (Position, er
 	}, nil
 }
 
-// ExecuteReversal is called by the worker after permission and approval checks.
-// expectedExecutionID pins the approved active execution (rollback) or the
-// approved successful rollback (forward), preventing execution of stale jobs.
 func (s *Service) ExecuteReversal(ctx context.Context, targetDBID, migrationID, expectedExecutionID int, action, actor string) (*models.MigrationExecution, error) {
 	if targetDBID <= 0 || migrationID <= 0 || expectedExecutionID <= 0 ||
 		strings.TrimSpace(actor) == "" || (action != ActionRollback && action != ActionForward) {
