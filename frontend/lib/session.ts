@@ -2,6 +2,7 @@ export const SESSION_COOKIE = "wbd_session";
 
 export interface SessionClaims {
   userId: number;
+  username?: string;
   isAdmin: boolean;
   accessibleDbIds: number[];
 }
@@ -13,7 +14,10 @@ export function parseSessionClaims(
     return null;
   }
   try {
-    const decoded = decodeURIComponent(raw.trim());
+    const trimmed = raw.trim();
+    const decoded = trimmed.startsWith("{")
+      ? trimmed
+      : decodeURIComponent(trimmed);
     const parsed: unknown = JSON.parse(decoded);
     if (typeof parsed !== "object" || parsed === null) {
       return null;
@@ -37,11 +41,18 @@ export function parseSessionClaims(
     ) {
       return null;
     }
-    return {
+    const claims: SessionClaims = {
       userId: candidate.userId,
       isAdmin: candidate.isAdmin,
       accessibleDbIds: candidate.accessibleDbIds,
     };
+    if (
+      typeof candidate.username === "string" &&
+      candidate.username.trim().length > 0
+    ) {
+      claims.username = candidate.username;
+    }
+    return claims;
   } catch {
     return null;
   }

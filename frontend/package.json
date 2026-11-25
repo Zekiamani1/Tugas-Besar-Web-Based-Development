@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
-    "test:component": "vitest run tests/component"
+    "test:component": "vitest run tests/component",
+    "test:integration": "vitest run tests/integration"
   },
   "dependencies": {
     "next": "16.4.6",
@@ -30,6 +31,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
     "jsdom": "26.1.0",
+    "msw": "2",
     "tailwindcss": "4.3.3",
     "typescript": "^5",
     "vite-tsconfig-paths": "^6.1.1",

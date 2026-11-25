@@ -100,6 +100,15 @@ describe("Session claims serialization & Next.js 16 proxy middleware", () => {
     expect(authRes.headers.get("location")).toBe(
       "http://localhost:3000/dashboard"
     );
+
+    const staleSessionRes = proxy(
+      buildRequest("/login?reason=session", buildSessionCookie(DEVELOPER_CLAIMS))
+    );
+    expect(staleSessionRes.status).toBe(200);
+    expect(staleSessionRes.headers.get("x-middleware-next")).toBe("1");
+    expect(staleSessionRes.headers.get("set-cookie")).toContain(
+      `${SESSION_COOKIE}=; Path=/; Max-Age=0`
+    );
   });
 
   it("redirects unauthenticated access on protected routes to /login?reason=session", () => {

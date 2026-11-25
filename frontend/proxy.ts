@@ -15,6 +15,11 @@ export function proxy(request: NextRequest) {
 
   if (pathname === "/login") {
     if (session) {
+      if (request.nextUrl.searchParams.get("reason") === "session") {
+        const response = NextResponse.next();
+        response.cookies.set(SESSION_COOKIE, "", { path: "/", maxAge: 0 });
+        return response;
+      }
       return NextResponse.redirect(new URL("/dashboard", request.url));
     }
     return NextResponse.next();

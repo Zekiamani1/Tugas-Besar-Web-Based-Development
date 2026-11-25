@@ -1,14 +1,20 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { AlertMessage } from "@/components/ui/AlertMessage";
 import { Card } from "@/components/ui/Card";
 import { PageLayout } from "@/components/ui/PageLayout";
+import { AccountNav } from "@/features/auth/AccountNav";
 import {
   DatabaseExplorer,
   type ExplorerTab,
 } from "@/features/databases/DatabaseExplorer";
-import { EMPTY_TABLE_DATA } from "@/features/databases/logic";
+import { ApiError } from "@/lib/api/http";
+import { loadDatabaseExplorerData } from "@/lib/api/server/databases";
+import { getServerSessionContext } from "@/lib/api/server/session";
 import type { DatabaseExplorerInitialData } from "@/lib/types";
+
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Database Explorer · Database Manager",
@@ -28,7 +34,11 @@ export default async function DatabaseExplorerPage({
   params: ParamsPromise;
   searchParams: SearchParamsPromise;
 }) {
-  const [{ dbID }, resolvedSearch] = await Promise.all([params, searchParams]);
+  const [{ dbID }, resolvedSearch, { user }] = await Promise.all([
+    params,
+    searchParams,
+    getServerSessionContext(),
+  ]);
   const isValidId = /^\d+$/.test(dbID);
   const parsedDbId = isValidId ? Number.parseInt(dbID, 10) : 0;
 
@@ -37,7 +47,12 @@ export default async function DatabaseExplorerPage({
       <PageLayout
         subtitle="Database Manager"
         title="Database Tidak Valid"
-        nav={<Link href="/dashboard">Dashboard</Link>}
+        nav={
+          <>
+            <Link href="/dashboard">Dashboard</Link>
+            <AccountNav user={user} />
+          </>
+        }
       >
         <Card>
           <AlertMessage variant="error" message="ID database tidak valid." />
@@ -54,15 +69,28 @@ export default async function DatabaseExplorerPage({
   const rawTab = firstParam(resolvedSearch.tab);
   const tab: ExplorerTab = rawTab === "data" ? "data" : "structure";
 
-  const initialData: DatabaseExplorerInitialData = {
-    schemas: [],
-    activeSchema: schema ?? "",
-    tables: [],
-    activeTable: table ?? "",
-    activeTab: tab,
-    metadata: null,
-    tableData: EMPTY_TABLE_DATA,
-  };
+  let redirectTarget: string | null = null;
+  let initialData: DatabaseExplorerInitialData | null = null;
+
+  try {
+    initialData = await loadDatabaseExplorerData(parsedDbId, {
+      schema,
+      table,
+      tab,
+    });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      redirectTarget = "/login?reason=session";
+    } else if (err instanceof ApiError && err.status === 403) {
+      redirectTarget = "/forbidden?reason=database";
+    } else {
+      throw err;
+    }
+  }
+
+  if (redirectTarget || !initialData) {
+    redirect(redirectTarget ?? "/forbidden?reason=database");
+  }
 
   return (
     <PageLayout
@@ -72,6 +100,7 @@ export default async function DatabaseExplorerPage({
         <>
           <Link href="/dashboard">Dashboard</Link>
           <Link href={`/databases/${parsedDbId}/migrations`}>Migrations</Link>
+          <AccountNav user={user} />
         </>
       }
     >
