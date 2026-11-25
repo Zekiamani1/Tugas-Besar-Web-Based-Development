@@ -1149,6 +1149,10 @@ func migrationSQLFromRequest(r *http.Request, legacySQL *string) (string, error)
 }
 
 func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {
+	if app.migrationApproval != nil {
+		http.Error(w, "submit this migration for approval before execution", http.StatusConflict)
+		return
+	}
 	dbID, err := strconv.Atoi(r.PathValue("dbID"))
 	if err != nil {
 		http.Error(w, "invalid dbID", http.StatusBadRequest)

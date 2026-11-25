@@ -172,6 +172,24 @@ func TestMigrationAppIntegration(t *testing.T) {
 	if rec := request(http.MethodPost, executePath, "", editorCookie); rec.Code != http.StatusSeeOther {
 		t.Fatalf("editor execute: status=%d body=%s", rec.Code, rec.Body.String())
 	}
+	var job models.MigrationJob
+	if err := internalDB.Where("migration_id = ? AND target_db_id = ?", migrationID, targetID).First(&job).Error; err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != "QUEUED" {
+		t.Fatalf("expected queued job, got %s", job.Status)
+	}
+	validate := func(context.Context, models.MigrationJob) error { return nil }
+	execute := func(ctx context.Context, job models.MigrationJob) (migration.JobResult, error) {
+		_, err := mig.ExecuteApprovedApply(ctx, job.TargetDBID, job.MigrationID, job.Revision, job.Actor)
+		return migration.JobResult{}, err
+	}
+	if err := mig.ProcessJob(ctx, job.ID, validate, execute); err != nil {
+		t.Fatal(err)
+	}
+	if err := internalDB.First(&job, job.ID).Error; err != nil || job.Status != "SUCCEEDED" {
+		t.Fatalf("job did not succeed: status=%s err=%v", job.Status, err)
+	}
 	if !targetDB.Migrator().HasTable("migration_app_example") {
 		t.Fatal("migration did not create the target table")
 	}

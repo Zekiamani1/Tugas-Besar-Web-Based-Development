@@ -18,12 +18,16 @@ import (
 	"time"
 
 	"wbd/internal/models"
+	"wbd/internal/service/dbmanagement"
+	"wbd/internal/service/migration"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 	_ "modernc.org/sqlite"
 )
 
@@ -112,6 +116,7 @@ func setupe2e(t *testing.T) (string, *http.Client, *sql.DB, *sql.DB, string, int
 	serverCmd.Env = append(os.Environ(),
 		fmt.Sprintf("PORT=%d", serverPort),
 		fmt.Sprintf("DATABASE_URL=%s", internalDSN),
+		"RABBITMQ_URL=amqp://guest:guest@localhost:5672/",
 		"SESSION_ABSOLUTE_TTL=2h",
 		"SESSION_IDLE_TIMEOUT=30m",
 		"SESSION_ROTATION_INTERVAL=15m",
@@ -161,6 +166,42 @@ func setupe2e(t *testing.T) (string, *http.Client, *sql.DB, *sql.DB, string, int
 func TestE2E(t *testing.T) {
 	rootT := t
 	serverURL, client, internalDB, targetDB, targetHost, targetPort := setupe2e(t)
+	meta, err := gorm.Open(postgres.New(postgres.Config{Conn: internalDB}), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbm := dbmanagement.NewService(meta)
+	t.Cleanup(dbm.CloseAllTargetConnections)
+	mig := migration.NewService(meta, dbm)
+	processJob := func(t *testing.T, id int, expected string) {
+		t.Helper()
+		validate := func(context.Context, models.MigrationJob) error { return nil }
+		execute := func(ctx context.Context, job models.MigrationJob) (migration.JobResult, error) {
+			_, err := mig.ExecuteApprovedApply(ctx, job.TargetDBID, job.MigrationID, job.Revision, job.Actor)
+			return migration.JobResult{}, err
+		}
+		if err := mig.ProcessJob(context.Background(), id, validate, execute); err != nil {
+			t.Fatal(err)
+		}
+		var job models.MigrationJob
+		if err := meta.First(&job, id).Error; err != nil || job.Status != expected {
+			t.Fatalf("job status=%s, expected=%s, error=%v", job.Status, expected, err)
+		}
+	}
+	readJob := func(t *testing.T, response *http.Response) int {
+		t.Helper()
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusAccepted {
+			t.Fatalf("expected 202, got %d", response.StatusCode)
+		}
+		var body struct {
+			JobID int `json:"job_id"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil || body.JobID <= 0 {
+			t.Fatalf("invalid job response: %+v, %v", body, err)
+		}
+		return body.JobID
+	}
 
 	var targetDatabaseID int
 	var sqliteDatabaseID int
@@ -618,12 +659,12 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("Developer Successfully Executes Table Migration", func(t *testing.T) {
-		execPayload, _ := json.Marshal(map[string]string{"token": "budi_developer"})
+		execPayload, _ := json.Marshal(map[string]int{"revision": 2})
 		resp, err := client.Post(fmt.Sprintf("%s/databases/%d/migrations/%s/execute", serverURL, targetDatabaseID, draftID), "application/json", bytes.NewReader(execPayload))
-		if err != nil || resp.StatusCode != http.StatusSeeOther {
-			t.Fatalf("failed to execute migration: %d", resp.StatusCode)
+		if err != nil {
+			t.Fatal(err)
 		}
-		resp.Body.Close()
+		processJob(t, readJob(t, resp), "SUCCEEDED")
 	})
 
 	t.Run("Developer Executes Seed Data Migration", func(t *testing.T) {
@@ -633,12 +674,9 @@ func TestE2E(t *testing.T) {
 		resp, _ := client.Post(fmt.Sprintf("%s/databases/%d/migrations", serverURL, targetDatabaseID), "application/json", bytes.NewReader(draft2Payload))
 		resp.Body.Close()
 
-		execPayload, _ := json.Marshal(map[string]string{"token": "budi_developer"})
+		execPayload, _ := json.Marshal(map[string]int{"revision": 1})
 		resp, _ = client.Post(fmt.Sprintf("%s/databases/%d/migrations/2/execute", serverURL, targetDatabaseID), "application/json", bytes.NewReader(execPayload))
-		if resp.StatusCode != http.StatusSeeOther {
-			t.Fatalf("failed to execute data migration: %d", resp.StatusCode)
-		}
-		resp.Body.Close()
+		processJob(t, readJob(t, resp), "SUCCEEDED")
 	})
 
 	t.Run("Display Newly Inserted Data Rows", func(t *testing.T) {
@@ -657,12 +695,9 @@ func TestE2E(t *testing.T) {
 		resp, _ := client.Post(fmt.Sprintf("%s/databases/%d/migrations", serverURL, targetDatabaseID), "application/json", bytes.NewReader(badPayload))
 		resp.Body.Close()
 
-		execPayload, _ := json.Marshal(map[string]string{"token": "budi_developer"})
+		execPayload, _ := json.Marshal(map[string]int{"revision": 1})
 		resp, _ = client.Post(fmt.Sprintf("%s/databases/%d/migrations/3/execute", serverURL, targetDatabaseID), "application/json", bytes.NewReader(execPayload))
-		if resp.StatusCode != http.StatusInternalServerError {
-			t.Errorf("expected status 500 on failing migration, but got %d", resp.StatusCode)
-		}
-		resp.Body.Close()
+		processJob(t, readJob(t, resp), "FAILED")
 	})
 
 	t.Run("Verify Rollback on Physical Database", func(t *testing.T) {
