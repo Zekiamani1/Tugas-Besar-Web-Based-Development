@@ -25,9 +25,8 @@ WORKDIR /app
 # Copy root CA certificates from builder stage for secure TLS connections
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
-# Copy binary and runtime web assets (templates & static files)
+# Copy compiled server binary
 COPY --from=builder /app/bin/server /app/server
-COPY --from=builder /app/web /app/web
 
 # Set ownership to unprivileged user
 RUN chown -R appuser:appgroup /app

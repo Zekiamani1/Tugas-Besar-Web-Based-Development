@@ -12,6 +12,7 @@ docker-compose*.yml
 bin
 tmp
 dist
+web
 .DS_Store
 .idea
 .vscode

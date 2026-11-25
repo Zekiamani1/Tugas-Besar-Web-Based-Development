@@ -1,9 +1,9 @@
 services:
-  app:
+  backend:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile
-    container_name: wbd-app
+    container_name: wbd-backend
     restart: unless-stopped
     env_file:
       - .env
@@ -15,11 +15,38 @@ services:
     networks:
       - wbd-network
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:$${PORT:-8080}/login || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8080}/health >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    container_name: wbd-frontend
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+      INTERNAL_API_URL: http://backend:${PORT:-8080}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - wbd-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/login >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   db:
     image: postgres:16-alpine
