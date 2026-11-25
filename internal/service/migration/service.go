@@ -2,10 +2,18 @@ package migration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+	"gorm.io/gorm/clause"
 
 	"gorm.io/gorm"
 
@@ -33,6 +41,7 @@ var (
 )
 
 type Service struct {
+	Reconcile  JobExecutor
 	internalDB *gorm.DB
 	dbMgmt     interfaces.DBManagementService
 }
@@ -395,4 +404,154 @@ func (s *Service) runAttempt(ctx context.Context, execution models.MigrationExec
 		return nil, fmt.Errorf("%w: %v", ErrHistoryUpdateUncertain, err)
 	}
 	return &execution, nil
+}
+
+var ErrIntegrationPending = errors.New("migration integration pending")
+var ErrRetrySafe = errors.New("executor confirmed retry is safe")
+var ErrJobConflict = errors.New("migration already has a pending job")
+var ErrInvalidJob = errors.New("invalid migration job")
+
+type JobResult struct {
+	Status           string
+	CommittedBatches int64
+	CommittedRows    int64
+}
+
+type JobExecutor func(context.Context, models.MigrationJob) (JobResult, error)
+type JobValidator func(context.Context, models.MigrationJob) error
+
+func (s *Service) UpdateJobProgress(ctx context.Context, id int, batches, rows int64) error {
+	if id <= 0 || batches < 0 || rows < 0 {
+		return ErrInvalidJob
+	}
+	r := s.internalDB.WithContext(ctx).Model(&models.MigrationJob{}).Where("id = ? AND status = ?", id, "RUNNING").Updates(map[string]any{"committed_batches": batches, "committed_rows": rows})
+	if r.Error != nil {
+		return r.Error
+	}
+	if r.RowsAffected != 1 {
+		return ErrJobConflict
+	}
+	return nil
+}
+
+func jobEvent(ctx context.Context, event string, job models.MigrationJob) {
+	sc := trace.SpanContextFromContext(ctx)
+	slog.Info(event, "event", event, "job_id", job.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "actor", job.Actor, "status", job.Status, "attempt", job.Attempts, "trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
+}
+
+func (s *Service) SubmitJob(ctx context.Context, job models.MigrationJob) (int, error) {
+	if job.TargetDBID <= 0 || job.MigrationID <= 0 || strings.TrimSpace(job.Actor) == "" || (job.Action != "APPLY" && job.Action != "ROLLBACK" && job.Action != "FORWARD") || (job.Mode != "STANDARD" && job.Mode != "BATCH") || (job.Mode == "BATCH" && job.BatchSize <= 0) || (job.Mode == "STANDARD" && job.BatchSize != 0) {
+		return 0, ErrInvalidJob
+	}
+	if (job.Action == ActionApply && (job.Revision <= 0 || job.ExpectedExecutionID != 0)) || (job.Action != ActionApply && (job.ExpectedExecutionID <= 0 || job.Revision != 0)) {
+		return 0, ErrInvalidJob
+	}
+	carrier := propagation.MapCarrier{}
+	propagation.TraceContext{}.Inject(ctx, carrier)
+	job.ID, job.Status, job.TraceParent = 0, "QUEUED", carrier.Get("traceparent")
+	err := s.internalDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(3112, ?)", job.MigrationID).Error; err != nil {
+			return err
+		}
+		var record models.Migration
+		if err := tx.Where("id = ? AND target_db_id = ?", job.MigrationID, job.TargetDBID).First(&record).Error; err != nil {
+			return err
+		}
+		var count int64
+		if err := tx.Model(&models.MigrationJob{}).Where("migration_id = ? AND status IN ?", job.MigrationID, []string{"QUEUED", "RUNNING"}).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return ErrJobConflict
+		}
+		return tx.Create(&job).Error
+	})
+	if err != nil {
+		return 0, err
+	}
+	jobEvent(ctx, "job.queued", job)
+	return job.ID, nil
+}
+
+func (s *Service) FindJob(ctx context.Context, dbID, migrationID, id int) (*models.MigrationJob, error) {
+	var job models.MigrationJob
+	query := s.internalDB.WithContext(ctx).Where("target_db_id = ? AND migration_id = ?", dbID, migrationID)
+	if id > 0 {
+		query = query.Where("id = ?", id)
+	}
+	err := query.Order("id DESC").First(&job).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) && id == 0 {
+		return nil, nil
+	}
+	return &job, err
+}
+
+func (s *Service) RunPublisher(ctx context.Context, conn *amqp.Connection, queue string) error {
+	ch, err := conn.Channel()
+	if err != nil {
+		return err
+	}
+	defer ch.Close()
+	if _, err := ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
+		return err
+	}
+	if err := ch.Confirm(false); err != nil {
+		return err
+	}
+	returns := ch.NotifyReturn(make(chan amqp.Return, 1))
+	for ctx.Err() == nil {
+		attemptedJobID := 0
+		err := s.internalDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var job models.MigrationJob
+			r := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("status = ? AND published_at IS NULL AND next_attempt_at <= ?", "QUEUED", time.Now().UTC()).Order("id").Limit(1).Find(&job)
+			if r.Error != nil || r.RowsAffected == 0 {
+				return r.Error
+			}
+			attemptedJobID = job.ID
+			publishCtx := propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": job.TraceParent})
+			publishCtx, span := otel.Tracer("wbd/async").Start(publishCtx, "queue.publish")
+			defer span.End()
+			carrier := propagation.MapCarrier{}
+			propagation.TraceContext{}.Inject(publishCtx, carrier)
+			body, _ := json.Marshal(map[string]int{"job_id": job.ID})
+			confirm, err := ch.PublishWithDeferredConfirmWithContext(publishCtx, "", queue, true, false, amqp.Publishing{ContentType: "application/json", DeliveryMode: amqp.Persistent, Body: body, Headers: amqp.Table{"traceparent": carrier.Get("traceparent")}})
+			if err != nil {
+				return err
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if confirm == nil {
+				return errors.New("publisher confirm missing")
+			}
+			ok, err := confirm.WaitContext(waitCtx)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return errors.New("publication rejected")
+			}
+			select {
+			case <-returns:
+				return errors.New("publication unroutable")
+			default:
+			}
+			jobEvent(publishCtx, "job.published", job)
+			return tx.Model(&job).Updates(map[string]any{"published_at": time.Now().UTC(), "publish_failures": 0}).Error
+		})
+		if err != nil {
+			if attemptedJobID > 0 && ctx.Err() == nil {
+				updates := map[string]any{"publish_failures": gorm.Expr("publish_failures + 1"), "next_attempt_at": time.Now().UTC().Add(5 * time.Second)}
+				if updateErr := s.internalDB.WithContext(ctx).Model(&models.MigrationJob{}).Where("id = ? AND status = ? AND published_at IS NULL", attemptedJobID, "QUEUED").Updates(updates).Error; updateErr != nil {
+					return errors.Join(err, updateErr)
+				}
+			}
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(time.Second):
+		}
+	}
+	return nil
 }

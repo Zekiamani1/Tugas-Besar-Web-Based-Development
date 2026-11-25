@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel"
 	"gorm.io/gorm"
 	"html/template"
 	"mime"
@@ -886,6 +887,32 @@ func (app *App) handleGetMigrationDetail(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid migrationID", http.StatusBadRequest)
 		return
 	}
+	if value := r.URL.Query().Get("job_id"); value != "" {
+		jobID, err := strconv.Atoi(value)
+		if err != nil || jobID <= 0 {
+			http.Error(w, "invalid job ID", http.StatusBadRequest)
+			return
+		}
+		jobs, ok := app.MigrationService.(interface {
+			FindJob(context.Context, int, int, int) (*models.MigrationJob, error)
+		})
+		if !ok {
+			http.Error(w, "job service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		job, err := jobs.FindJob(r.Context(), dbID, migrationID, jobID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "unable to read job", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(job)
+		return
+	}
 	app.renderMigrationDetail(w, r, dbID, migrationID, http.StatusOK, "", "")
 }
 
@@ -1122,10 +1149,6 @@ func migrationSQLFromRequest(r *http.Request, legacySQL *string) (string, error)
 }
 
 func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {
-	if app.migrationApproval != nil {
-		http.Error(w, "submit this migration for approval before execution", http.StatusConflict)
-		return
-	}
 	dbID, err := strconv.Atoi(r.PathValue("dbID"))
 	if err != nil {
 		http.Error(w, "invalid dbID", http.StatusBadRequest)
@@ -1150,13 +1173,70 @@ func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if _, err := app.ExecuteMigration(r.Context(), dbID, migrationID, strconv.Itoa(userID)); err != nil {
-		if isFormRequest(r) {
-			app.renderMigrationDetail(w, r, dbID, migrationID, http.StatusInternalServerError, "Migration failed. Check the SQL and the target database status.", "")
-		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+	jobs, ok := app.MigrationService.(interface {
+		SubmitJob(context.Context, models.MigrationJob) (int, error)
+	})
+	if !ok {
+		http.Error(w, "job service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	http.Redirect(w, r, fmt.Sprintf("/databases/%d/migrations/%d", dbID, migrationID), http.StatusSeeOther)
+	var input struct {
+		Action              string `json:"action"`
+		Mode                string `json:"mode"`
+		BatchSize           int    `json:"batch_size"`
+		Revision            int    `json:"revision"`
+		ExpectedExecutionID int    `json:"expected_execution_id"`
+	}
+	if isFormRequest(r) {
+		reader, ok := app.MigrationService.(interface {
+			GetDefinition(context.Context, int, int) (models.Migration, error)
+		})
+		if !ok {
+			http.Error(w, "migration definition unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		definition, err := reader.GetDefinition(r.Context(), dbID, migrationID)
+		if err != nil {
+			http.Error(w, "migration not found", http.StatusNotFound)
+			return
+		}
+		input.Revision = definition.Revision
+	} else if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if input.Action == "" {
+		input.Action = migration.ActionApply
+	}
+	if input.Mode == "" {
+		input.Mode = "STANDARD"
+	}
+	ctx, span := otel.Tracer("wbd/async").Start(r.Context(), "api.submit")
+	defer span.End()
+	id, err := jobs.SubmitJob(ctx, models.MigrationJob{TargetDBID: dbID, MigrationID: migrationID, Actor: strconv.Itoa(userID), Action: input.Action, Mode: input.Mode, BatchSize: input.BatchSize, Revision: input.Revision, ExpectedExecutionID: input.ExpectedExecutionID})
+	if errors.Is(err, migration.ErrInvalidJob) {
+		http.Error(w, "invalid job", http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, migration.ErrJobConflict) {
+		http.Error(w, "job already pending", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		http.Error(w, "migration not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "unable to queue job", http.StatusInternalServerError)
+		return
+	}
+	location := fmt.Sprintf("/databases/%d/migrations/%d?job_id=%d", dbID, migrationID, id)
+	if isFormRequest(r) {
+		http.Redirect(w, r, location, http.StatusSeeOther)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Location", location)
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{"job_id": id, "status": "QUEUED", "status_url": location})
 }
