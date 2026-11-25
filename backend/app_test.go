@@ -497,7 +497,7 @@ func TestDBManagementHandlers(t *testing.T) {
 		if !strings.Contains(rec.Header().Get("Content-Type"), "application/json") || !strings.Contains(body, `"production_pg"`) || strings.Contains(body, `"analytics_pg"`) {
 			t.Errorf("expected filtered production_pg only in JSON, got:\n%s", body)
 		}
-		if strings.Contains(body, "secret-password") || strings.Contains(body, "db-user") || strings.Contains(body, `"User"`) || strings.Contains(body, `"Password"`) {
+		if strings.Contains(body, "secret-password") || strings.Contains(body, "db-user") || strings.Contains(body, `"user"`) || strings.Contains(body, `"password"`) {
 			t.Errorf("databases endpoint exposed credentials: %s", body)
 		}
 	})
@@ -723,7 +723,7 @@ func TestAdminEntityListPages(t *testing.T) {
 		wantText    []string
 		mustNotHave []string
 	}{
-		{path: "/admin/users", wantText: []string{`"users"`, "alice", `"ID":4`}, mustNotHave: []string{"do-not-display-this", "password_hash"}},
+		{path: "/admin/users", wantText: []string{`"users"`, "alice", `"id":4`}, mustNotHave: []string{"do-not-display-this", "password_hash"}},
 		{path: "/admin/groups", wantText: []string{`"groups"`, "analysts", `"id":2`}, mustNotHave: []string{"do-not-display-this"}},
 		{path: "/admin/databases", wantText: []string{`"databases"`, "analytics", `"id":9`, "db.internal", "analytics_db"}, mustNotHave: []string{"do-not-display-this", "db-admin"}},
 	}

@@ -155,7 +155,7 @@ func TestMigrationAppIntegration(t *testing.T) {
 		t.Fatalf("invalid created draft JSON %q: %v", created.Body.String(), err)
 	}
 	migrationID := createResp.ID
-	if rec := request(http.MethodGet, basePath, nil, editorCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), fmt.Sprintf(`"ID":%d`, migrationID)) {
+	if rec := request(http.MethodGet, basePath, nil, editorCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), fmt.Sprintf(`"id":%d`, migrationID)) {
 		t.Fatalf("editor cannot find the saved draft: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if rec := request(http.MethodGet, basePath, nil, viewerCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"drafts":[]`) {

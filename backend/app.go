@@ -124,11 +124,7 @@ func (app *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user": map[string]any{
-			"id":       currentUser.ID,
-			"username": currentUser.Username,
-			"is_admin": currentUser.IsAdmin,
-		},
+		"user": currentUser,
 	})
 }
 
@@ -166,15 +162,15 @@ func (app *App) handleListGroups(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 	}
 	type groupDatabaseAccess struct {
-		TargetDBID   int    `json:"target_db_id"`
-		DatabaseName string `json:"database_name"`
-		AccessLevel  string `json:"access_level"`
+		TargetDBID   int    `json:"targetDbId"`
+		DatabaseName string `json:"databaseName"`
+		AccessLevel  string `json:"accessLevel"`
 	}
 	type groupDetail struct {
 		ID             int                   `json:"id"`
 		Name           string                `json:"name"`
 		Members        []groupMember         `json:"members"`
-		DatabaseAccess []groupDatabaseAccess `json:"database_access"`
+		DatabaseAccess []groupDatabaseAccess `json:"databaseAccess"`
 	}
 
 	details := make([]groupDetail, 0, len(groups))
@@ -210,10 +206,10 @@ func (app *App) writeDatabaseSummaries(w http.ResponseWriter, databases []models
 	type databaseSummary struct {
 		ID     int    `json:"id"`
 		Name   string `json:"name"`
-		DBType string `json:"db_type"`
+		DBType string `json:"dbType"`
 		Host   string `json:"host"`
 		Port   int    `json:"port"`
-		DBName string `json:"db_name"`
+		DBName string `json:"dbName"`
 	}
 	summaries := make([]databaseSummary, 0, len(databases))
 	for _, database := range databases {
@@ -444,6 +440,17 @@ func (app *App) handleGetTableDetails(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if details != nil {
+		if details.Columns == nil {
+			details.Columns = make([]models.ColumnInfo, 0)
+		}
+		if details.Constraints == nil {
+			details.Constraints = make([]models.ConstraintInfo, 0)
+		}
+		if details.Indexes == nil {
+			details.Indexes = make([]models.IndexInfo, 0)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"db_id":    dbID,

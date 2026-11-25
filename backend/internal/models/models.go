@@ -1,50 +1,78 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type TargetDBInfo struct {
-	ID       int `gorm:"primaryKey"`
-	Name     string
-	DBType   string
-	Host     string
-	Port     int
-	User     string
-	Password string
-	DBName   string
+	ID       int    `gorm:"primaryKey" json:"id"`
+	Name     string `json:"name"`
+	DBType   string `json:"dbType"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user,omitempty"`
+	Password string `json:"password,omitempty"`
+	DBName   string `json:"dbName"`
 }
 
 type TableMetadata struct {
-	Schema      string
-	TableName   string
-	Columns     []ColumnInfo
-	Constraints []ConstraintInfo
-	Indexes     []IndexInfo
+	Schema      string           `json:"schema"`
+	TableName   string           `json:"tableName"`
+	Columns     []ColumnInfo     `json:"columns"`
+	Constraints []ConstraintInfo `json:"constraints"`
+	Indexes     []IndexInfo      `json:"indexes"`
 }
 
 type ColumnInfo struct {
-	Name       string
-	DataType   string
-	IsNullable bool
+	Name       string `json:"name"`
+	DataType   string `json:"dataType"`
+	IsNullable bool   `json:"isNullable"`
 }
 
 type ConstraintInfo struct {
-	Name string
-	Type string
+	Name string `json:"name"`
+	Type string `json:"type"`
 }
 
 type IndexInfo struct {
-	Name     string
-	IsUnique bool
+	Name     string `json:"name"`
+	IsUnique bool   `json:"isUnique"`
 }
 
 type MigrationRecord struct {
-	ID         int
-	TargetDBID int
-	Version    int
-	SQLQuery   string
-	ExecutedBy string
-	Status     string
-	ExecutedAt time.Time
+	ID         int       `json:"id"`
+	TargetDBID int       `json:"targetDbId"`
+	Version    int       `json:"version"`
+	SQLQuery   string    `json:"sqlQuery"`
+	ExecutedBy string    `json:"executedBy"`
+	Status     string    `json:"status"`
+	ExecutedAt time.Time `json:"executedAt"`
+}
+
+func (m MigrationRecord) MarshalJSON() ([]byte, error) {
+	type migrationJSON struct {
+		ID         int    `json:"id"`
+		TargetDBID int    `json:"targetDbId"`
+		Version    int    `json:"version"`
+		SQLQuery   string `json:"sqlQuery"`
+		ExecutedBy string `json:"executedBy"`
+		Status     string `json:"status"`
+		ExecutedAt string `json:"executedAt"`
+	}
+	executedAt := ""
+	if !m.ExecutedAt.IsZero() {
+		executedAt = m.ExecutedAt.UTC().Format(time.RFC3339)
+	}
+	return json.Marshal(migrationJSON{
+		ID:         m.ID,
+		TargetDBID: m.TargetDBID,
+		Version:    m.Version,
+		SQLQuery:   m.SQLQuery,
+		ExecutedBy: m.ExecutedBy,
+		Status:     m.Status,
+		ExecutedAt: executedAt,
+	})
 }
 
 type User struct {
@@ -56,9 +84,9 @@ type User struct {
 
 // UserSummary contains the user fields that are safe to display in admin pages.
 type UserSummary struct {
-	ID       int
-	Username string
-	IsAdmin  bool
+	ID       int    `json:"id"`
+	Username string `json:"username"`
+	IsAdmin  bool   `json:"isAdmin"`
 }
 
 // SessionValidation contains the authenticated user and the current session ID.
@@ -86,8 +114,8 @@ type SessionAlias struct {
 }
 
 type Group struct {
-	ID   int    `gorm:"primaryKey"`
-	Name string `gorm:"uniqueIndex;not null"`
+	ID   int    `gorm:"primaryKey" json:"id"`
+	Name string `gorm:"uniqueIndex;not null" json:"name"`
 }
 
 // GroupMemberSummary contains safe user details for a group's member list.
