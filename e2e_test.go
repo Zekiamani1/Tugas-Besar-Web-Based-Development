@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -135,7 +136,7 @@ func setupe2e(t *testing.T) (string, *http.Client, *sql.DB, *sql.DB, string, int
 	serverReady := false
 	for attempt := 0; attempt < 50; attempt++ {
 		time.Sleep(100 * time.Millisecond)
-		if resp, err := http.Get(serverBaseURL + "/login"); err == nil && resp.StatusCode == http.StatusOK {
+		if resp, err := http.Get(serverBaseURL + "/health"); err == nil && resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
 			serverReady = true
 			break
@@ -176,7 +177,7 @@ func TestE2E(t *testing.T) {
 		if err != nil {
 			t.Fatalf("admin login request failed: %v", err)
 		}
-		if resp.StatusCode != http.StatusSeeOther {
+		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("admin login failed: status %v", resp.StatusCode)
 		}
 		if len(resp.Cookies()) == 0 {
@@ -359,14 +360,14 @@ func TestE2E(t *testing.T) {
 
 	t.Run("Admin Logout", func(t *testing.T) {
 		resp, err := client.Post(serverURL+"/logout", "application/json", nil)
-		if err != nil || resp.StatusCode != http.StatusSeeOther {
+		if err != nil || resp.StatusCode != http.StatusOK {
 			t.Fatalf("admin logout failed: status %v", resp.StatusCode)
 		}
 		resp.Body.Close()
 	})
 
-	t.Run("Dashboard Access Denied Without Authentication", func(t *testing.T) {
-		resp, _ := client.Get(serverURL + "/dashboard")
+	t.Run("Databases List Access Denied Without Authentication", func(t *testing.T) {
+		resp, _ := client.Get(serverURL + "/databases")
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("expected status 401 without login, but got %d", resp.StatusCode)
 		}
@@ -374,7 +375,7 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("Admin Panel Access Denied Without Authentication", func(t *testing.T) {
-		resp, _ := client.Get(serverURL + "/admin")
+		resp, _ := client.Get(serverURL + "/admin/users")
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("expected status 401 without login, but got %d", resp.StatusCode)
 		}
@@ -392,16 +393,8 @@ func TestE2E(t *testing.T) {
 	t.Run("Analyst Login (View Only)", func(t *testing.T) {
 		loginPayload, _ := json.Marshal(map[string]string{"username": "siti_analyst", "password": "SitiPassword123!"})
 		resp, err := client.Post(serverURL+"/login", "application/json", bytes.NewReader(loginPayload))
-		if err != nil || resp.StatusCode != http.StatusSeeOther {
+		if err != nil || resp.StatusCode != http.StatusOK {
 			t.Fatalf("analyst login failed: status %v", resp.StatusCode)
-		}
-		resp.Body.Close()
-	})
-
-	t.Run("Analyst Accesses Database and Redirects to Schemas", func(t *testing.T) {
-		resp, _ := client.Get(fmt.Sprintf("%s/databases/%d", serverURL, targetDatabaseID))
-		if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != fmt.Sprintf("/databases/%d/schemas", targetDatabaseID) {
-			t.Errorf("database page redirection failed, status: %d", resp.StatusCode)
 		}
 		resp.Body.Close()
 	})
@@ -491,7 +484,15 @@ func TestE2E(t *testing.T) {
 
 	t.Run("Migration Edit Denied for View Only", func(t *testing.T) {
 		editPayload, _ := json.Marshal(map[string]string{"sql_query": "ALTER TABLE forbidden_test ADD COLUMN x INT;"})
-		resp, _ := client.Post(fmt.Sprintf("%s/databases/%d/migrations/1/edit", serverURL, targetDatabaseID), "application/json", bytes.NewReader(editPayload))
+		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/databases/%d/migrations/1", serverURL, targetDatabaseID), bytes.NewReader(editPayload))
+		if err != nil {
+			t.Fatalf("failed to create edit request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("edit request failed: %v", err)
+		}
 		if resp.StatusCode != http.StatusForbidden {
 			t.Errorf("expected status 403 when VIEW_ONLY edits migration, got: %d", resp.StatusCode)
 		}
@@ -516,9 +517,9 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("Admin Panel Access Denied for Non-Admin", func(t *testing.T) {
-		resp, _ := client.Get(serverURL + "/admin")
+		resp, _ := client.Get(serverURL + "/admin/users")
 		if resp.StatusCode != http.StatusForbidden {
-			t.Errorf("expected status 403 for non-admin on /admin, got: %d", resp.StatusCode)
+			t.Errorf("expected status 403 for non-admin on /admin/users, got: %d", resp.StatusCode)
 		}
 		resp.Body.Close()
 	})
@@ -561,7 +562,7 @@ func TestE2E(t *testing.T) {
 
 	t.Run("Analyst Logout", func(t *testing.T) {
 		resp, _ := client.Post(serverURL+"/logout", "application/json", nil)
-		if resp.StatusCode != http.StatusSeeOther {
+		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("analyst logout failed: status %v", resp.StatusCode)
 		}
 		resp.Body.Close()
@@ -570,7 +571,7 @@ func TestE2E(t *testing.T) {
 	t.Run("Developer Login", func(t *testing.T) {
 		loginPayload, _ := json.Marshal(map[string]string{"username": "budi_developer", "password": "BudiPassword123!"})
 		resp, err := client.Post(serverURL+"/login", "application/json", bytes.NewReader(loginPayload))
-		if err != nil || resp.StatusCode != http.StatusSeeOther {
+		if err != nil || resp.StatusCode != http.StatusOK {
 			t.Fatalf("developer login failed: status %v", resp.StatusCode)
 		}
 		resp.Body.Close()
@@ -598,11 +599,17 @@ func TestE2E(t *testing.T) {
 			"sql_query": "CREATE TABLE public.produk (id SERIAL PRIMARY KEY, nama TEXT NOT NULL, harga INT NOT NULL);",
 		})
 		resp, err := client.Post(fmt.Sprintf("%s/databases/%d/migrations", serverURL, targetDatabaseID), "application/json", bytes.NewReader(draft1Payload))
-		if err != nil || resp.StatusCode != http.StatusSeeOther {
+		if err != nil || resp.StatusCode != http.StatusCreated {
 			t.Fatalf("failed to create migration draft: %d", resp.StatusCode)
 		}
-		loc := resp.Header.Get("Location")
-		draftID = loc[strings.LastIndex(loc, "/")+1:]
+		var created struct {
+			ID int `json:"id"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&created); err != nil || created.ID <= 0 {
+			resp.Body.Close()
+			t.Fatalf("invalid created draft response: %v", err)
+		}
+		draftID = strconv.Itoa(created.ID)
 		resp.Body.Close()
 	})
 
@@ -610,8 +617,16 @@ func TestE2E(t *testing.T) {
 		draftEditPayload, _ := json.Marshal(map[string]string{
 			"sql_query": "CREATE TABLE public.produk (id SERIAL PRIMARY KEY, nama TEXT NOT NULL, harga INT NOT NULL, stok INT DEFAULT 0);",
 		})
-		resp, err := client.Post(fmt.Sprintf("%s/databases/%d/migrations/%s/edit", serverURL, targetDatabaseID, draftID), "application/json", bytes.NewReader(draftEditPayload))
-		if err != nil || resp.StatusCode != http.StatusSeeOther {
+		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/databases/%d/migrations/%s", serverURL, targetDatabaseID, draftID), bytes.NewReader(draftEditPayload))
+		if err != nil {
+			t.Fatalf("failed to create edit request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("failed to update migration draft: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("failed to update migration draft: %d", resp.StatusCode)
 		}
 		resp.Body.Close()
@@ -620,7 +635,7 @@ func TestE2E(t *testing.T) {
 	t.Run("Developer Successfully Executes Table Migration", func(t *testing.T) {
 		execPayload, _ := json.Marshal(map[string]string{"token": "budi_developer"})
 		resp, err := client.Post(fmt.Sprintf("%s/databases/%d/migrations/%s/execute", serverURL, targetDatabaseID, draftID), "application/json", bytes.NewReader(execPayload))
-		if err != nil || resp.StatusCode != http.StatusSeeOther {
+		if err != nil || resp.StatusCode != http.StatusOK {
 			t.Fatalf("failed to execute migration: %d", resp.StatusCode)
 		}
 		resp.Body.Close()
@@ -635,7 +650,7 @@ func TestE2E(t *testing.T) {
 
 		execPayload, _ := json.Marshal(map[string]string{"token": "budi_developer"})
 		resp, _ = client.Post(fmt.Sprintf("%s/databases/%d/migrations/2/execute", serverURL, targetDatabaseID), "application/json", bytes.NewReader(execPayload))
-		if resp.StatusCode != http.StatusSeeOther {
+		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("failed to execute data migration: %d", resp.StatusCode)
 		}
 		resp.Body.Close()
@@ -678,14 +693,14 @@ func TestE2E(t *testing.T) {
 
 	t.Run("Final Logout", func(t *testing.T) {
 		resp, _ := client.Post(serverURL+"/logout", "application/json", nil)
-		if resp.StatusCode != http.StatusSeeOther {
+		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("final logout failed: status %v", resp.StatusCode)
 		}
 		resp.Body.Close()
 	})
 
-	t.Run("Dashboard Access Denied After Logout", func(t *testing.T) {
-		resp, _ := client.Get(serverURL + "/dashboard")
+	t.Run("Databases List Access Denied After Logout", func(t *testing.T) {
+		resp, _ := client.Get(serverURL + "/databases")
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("expected status 401 after logout, but got %d", resp.StatusCode)
 		}

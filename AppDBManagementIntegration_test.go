@@ -173,7 +173,7 @@ func TestIntegrationDBManagement(t *testing.T) {
 	}
 	id := strconv.Itoa(dbID)
 
-	t.Run("ListDatabasesAndDashboard", func(t *testing.T) {
+	t.Run("ListAccessibleDatabases", func(t *testing.T) {
 		dbs, err := dbmSvc.ListDatabases(ctx)
 		if err != nil {
 			t.Fatalf("expected ListDatabases to succeed, got error: %v", err)
@@ -182,17 +182,17 @@ func TestIntegrationDBManagement(t *testing.T) {
 			t.Fatalf("expected at least 1 database, got 0")
 		}
 
-		req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+		req := httptest.NewRequest(http.MethodGet, "/databases", nil)
 		req.AddCookie(&http.Cookie{Name: "session_id", Value: "integration-session"})
 		rec := httptest.NewRecorder()
-		app.handleDashboard(rec, req)
+		app.ServeHTTP(rec, req)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 		body := rec.Body.String()
-		if !strings.Contains(body, "integration_target") || !strings.Contains(body, "/databases/"+id+"/schemas") || !strings.Contains(body, "/databases/"+id+"/migrations") {
-			t.Errorf("expected database name, schemas link, and migrations link in dashboard, got:\n%s", body)
+		if !strings.Contains(rec.Header().Get("Content-Type"), "application/json") || !strings.Contains(body, "integration_target") {
+			t.Errorf("expected JSON databases response with integration_target, got:\n%s", body)
 		}
 	})
 

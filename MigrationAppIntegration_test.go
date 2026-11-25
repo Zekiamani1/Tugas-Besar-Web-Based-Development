@@ -1,11 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -96,7 +97,7 @@ func TestMigrationAppIntegration(t *testing.T) {
 		})
 		rec := httptest.NewRecorder()
 		app.ServeHTTP(rec, req)
-		if rec.Code != http.StatusSeeOther {
+		if rec.Code != http.StatusOK {
 			t.Fatalf("login %s: status=%d body=%s", username, rec.Code, rec.Body.String())
 		}
 		for _, cookie := range rec.Result().Cookies() {
@@ -107,14 +108,21 @@ func TestMigrationAppIntegration(t *testing.T) {
 		t.Fatalf("login %s did not set session cookie", username)
 		return nil
 	}
-	request := func(method, path, form string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	request := func(method, path string, body any, cookie *http.Cookie) *httptest.ResponseRecorder {
 		t.Helper()
-		req := httptest.NewRequest(method, path, strings.NewReader(form))
-		if form != "" {
-			addCSRFFormToken(req)
+		var bodyReader *bytes.Reader
+		if body == nil {
+			bodyReader = bytes.NewReader(nil)
+		} else {
+			payload, err := json.Marshal(body)
+			if err != nil {
+				t.Fatalf("marshal request body: %v", err)
+			}
+			bodyReader = bytes.NewReader(payload)
 		}
-		if form == "" && method == http.MethodPost {
-			addCSRFFormToken(req)
+		req := httptest.NewRequest(method, path, bodyReader)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
 		}
 		if cookie != nil {
 			req.AddCookie(cookie)
@@ -128,48 +136,51 @@ func TestMigrationAppIntegration(t *testing.T) {
 	editorCookie := login("editor")
 	basePath := fmt.Sprintf("/databases/%d/migrations", targetID)
 	sqlQuery := "SELECT count(*) FROM generate_series(1, 100)"
-	createForm := url.Values{"sql_query": {sqlQuery}}.Encode()
+	createBody := map[string]string{"sql_query": sqlQuery}
 
-	if rec := request(http.MethodPost, basePath, createForm, nil); rec.Code != http.StatusUnauthorized {
+	if rec := request(http.MethodPost, basePath, createBody, nil); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated create: status=%d", rec.Code)
 	}
-	if rec := request(http.MethodPost, basePath, createForm, viewerCookie); rec.Code != http.StatusForbidden {
+	if rec := request(http.MethodPost, basePath, createBody, viewerCookie); rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer create: status=%d", rec.Code)
 	}
-	created := request(http.MethodPost, basePath, createForm, editorCookie)
-	if created.Code != http.StatusSeeOther {
+	created := request(http.MethodPost, basePath, createBody, editorCookie)
+	if created.Code != http.StatusCreated {
 		t.Fatalf("editor create: status=%d body=%s", created.Code, created.Body.String())
 	}
-	migrationID, err := strconv.Atoi(strings.TrimPrefix(created.Header().Get("Location"), basePath+"/"))
-	if err != nil || migrationID <= 0 {
-		t.Fatalf("invalid draft redirect: %q", created.Header().Get("Location"))
+	var createResp struct {
+		ID int `json:"id"`
 	}
-	if rec := request(http.MethodGet, basePath, "", editorCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), fmt.Sprintf("Draft #%d", migrationID)) {
+	if err := json.NewDecoder(bytes.NewReader(created.Body.Bytes())).Decode(&createResp); err != nil || createResp.ID <= 0 {
+		t.Fatalf("invalid created draft JSON %q: %v", created.Body.String(), err)
+	}
+	migrationID := createResp.ID
+	if rec := request(http.MethodGet, basePath, nil, editorCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), fmt.Sprintf(`"ID":%d`, migrationID)) {
 		t.Fatalf("editor cannot find the saved draft: status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec := request(http.MethodGet, basePath, "", viewerCookie); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), fmt.Sprintf("Draft #%d", migrationID)) {
+	if rec := request(http.MethodGet, basePath, nil, viewerCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"drafts":[]`) {
 		t.Fatalf("viewer can see an editable draft: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
 	explainPath := fmt.Sprintf("%s/%d/explain", basePath, migrationID)
-	if rec := request(http.MethodPost, explainPath, "", viewerCookie); rec.Code != http.StatusForbidden {
+	if rec := request(http.MethodPost, explainPath, nil, viewerCookie); rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer explain: status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec := request(http.MethodPost, explainPath, "", editorCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Function Scan") {
+	if rec := request(http.MethodPost, explainPath, nil, editorCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Function Scan") {
 		t.Fatalf("editor explain: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
 	// Restore a DDL query so the existing execute flow verifies a real schema change.
-	ddlForm := url.Values{"sql_query": {"CREATE TABLE migration_app_example (id integer PRIMARY KEY)"}}.Encode()
-	if rec := request(http.MethodPost, fmt.Sprintf("%s/%d/edit", basePath, migrationID), ddlForm, editorCookie); rec.Code != http.StatusSeeOther {
+	ddlBody := map[string]string{"sql_query": "CREATE TABLE migration_app_example (id integer PRIMARY KEY)"}
+	if rec := request(http.MethodPut, fmt.Sprintf("%s/%d", basePath, migrationID), ddlBody, editorCookie); rec.Code != http.StatusOK {
 		t.Fatalf("restore DDL draft: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
 	executePath := fmt.Sprintf("%s/%d/execute", basePath, migrationID)
-	if rec := request(http.MethodPost, executePath, "", viewerCookie); rec.Code != http.StatusForbidden {
+	if rec := request(http.MethodPost, executePath, nil, viewerCookie); rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer execute: status=%d", rec.Code)
 	}
-	if rec := request(http.MethodPost, executePath, "", editorCookie); rec.Code != http.StatusSeeOther {
+	if rec := request(http.MethodPost, executePath, nil, editorCookie); rec.Code != http.StatusOK {
 		t.Fatalf("editor execute: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if !targetDB.Migrator().HasTable("migration_app_example") {
@@ -187,10 +198,10 @@ func TestMigrationAppIntegration(t *testing.T) {
 	if record.Status != migration.StatusApplied || record.Version != 1 || record.ExecutedBy != strconv.Itoa(editor.ID) || record.ExecutedAt.IsZero() {
 		t.Fatalf("unexpected migration history: %+v", record)
 	}
-	if rec := request(http.MethodGet, basePath, "", editorCookie); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), fmt.Sprintf("Draft #%d", migrationID)) {
+	if rec := request(http.MethodGet, basePath, nil, editorCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"drafts":[]`) {
 		t.Fatalf("executed draft still appears in draft list: status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec := request(http.MethodGet, basePath, "", viewerCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "APPLIED") {
+	if rec := request(http.MethodGet, basePath, nil, viewerCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "APPLIED") {
 		t.Fatalf("viewer history: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

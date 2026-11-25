@@ -72,9 +72,9 @@ func loginThroughApp(
 		},
 		nil,
 	)
-	if rec.Code != http.StatusSeeOther {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("login status = %d, want %d; body: %s",
-			rec.Code, http.StatusSeeOther, rec.Body.String())
+			rec.Code, http.StatusOK, rec.Body.String())
 	}
 
 	for _, cookie := range rec.Result().Cookies() {
@@ -156,7 +156,7 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 			t,
 			app,
 			http.MethodGet,
-			"/admin",
+			"/admin/users",
 			nil,
 			nil,
 		)
@@ -168,12 +168,12 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 
 	adminCookie := loginThroughApp(t, app, "platform-admin", "admin-password")
 
-	t.Run("authenticated platform admin can open admin page", func(t *testing.T) {
+	t.Run("authenticated platform admin can open admin users endpoint", func(t *testing.T) {
 		rec := sendAccessControlRequest(
 			t,
 			app,
 			http.MethodGet,
-			"/admin",
+			"/admin/users",
 			nil,
 			adminCookie,
 		)
@@ -299,12 +299,12 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 		t.Fatalf("login cookie has unexpected security attributes: %+v", viewerCookie)
 	}
 
-	t.Run("ordinary user cannot access Platform Admin page", func(t *testing.T) {
+	t.Run("ordinary user cannot access Platform Admin endpoint", func(t *testing.T) {
 		rec := sendAccessControlRequest(
 			t,
 			app,
 			http.MethodGet,
-			"/admin",
+			"/admin/users",
 			nil,
 			viewerCookie,
 		)
@@ -380,7 +380,7 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 			requests.Add(1)
 			go func() {
 				defer requests.Done()
-				req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+				req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
 				req.AddCookie(viewerCookie)
 				rec := httptest.NewRecorder()
 				app.ServeHTTP(rec, req)
@@ -547,9 +547,9 @@ func TestAccessControlAppMiddlewareServicePostgresIntegration(t *testing.T) {
 			map[string]string{},
 			viewerCookie,
 		)
-		if rec.Code != http.StatusSeeOther {
+		if rec.Code != http.StatusOK {
 			t.Fatalf("logout status = %d, want %d; body: %s",
-				rec.Code, http.StatusSeeOther, rec.Body.String())
+				rec.Code, http.StatusOK, rec.Body.String())
 		}
 
 		rec = sendAccessControlRequest(
