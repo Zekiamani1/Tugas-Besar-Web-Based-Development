@@ -146,7 +146,7 @@ func TestRequireAdminAccess(t *testing.T) {
 			next := func(w http.ResponseWriter, r *http.Request) {
 				nextCalled = true
 
-				userID, ok := userIDFromContext(r.Context())
+				userID, ok := UserIDFromContext(r.Context())
 				assert.True(t, ok)
 				assert.Equal(t, tt.userID, userID)
 
@@ -327,7 +327,7 @@ func TestRequireDBAccess(t *testing.T) {
 			next := func(w http.ResponseWriter, r *http.Request) {
 				nextCalled = true
 
-				userID, ok := userIDFromContext(r.Context())
+				userID, ok := UserIDFromContext(r.Context())
 				assert.True(t, ok)
 				assert.Equal(t, tt.userID, userID)
 

@@ -218,7 +218,7 @@ func TestRequireAuthValidSession(t *testing.T) {
 	next := func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
 
-		userID, ok := userIDFromContext(r.Context())
+		userID, ok := UserIDFromContext(r.Context())
 
 		require.True(t, ok)
 		assert.Equal(t, 7, userID)
@@ -275,7 +275,7 @@ func TestRequireAuthRefreshesRotatedSessionCookie(t *testing.T) {
 	ac.AssertExpectations(t)
 }
 
-// Test helper userIDFromContext.
+// Test helper UserIDFromContext.
 func TestUserIDFromContext(t *testing.T) {
 	t.Run("valid user ID", func(t *testing.T) {
 		ctx := context.WithValue(
@@ -284,14 +284,14 @@ func TestUserIDFromContext(t *testing.T) {
 			7,
 		)
 
-		userID, ok := userIDFromContext(ctx)
+		userID, ok := UserIDFromContext(ctx)
 
 		assert.True(t, ok)
 		assert.Equal(t, 7, userID)
 	})
 
 	t.Run("missing user ID", func(t *testing.T) {
-		userID, ok := userIDFromContext(context.Background())
+		userID, ok := UserIDFromContext(context.Background())
 
 		assert.False(t, ok)
 		assert.Equal(t, 0, userID)
@@ -304,7 +304,7 @@ func TestUserIDFromContext(t *testing.T) {
 			0,
 		)
 
-		_, ok := userIDFromContext(ctx)
+		_, ok := UserIDFromContext(ctx)
 
 		assert.False(t, ok)
 	})
