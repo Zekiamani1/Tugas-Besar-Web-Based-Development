@@ -463,6 +463,15 @@ func TestDBManagementHandlers(t *testing.T) {
 			}
 			return 7, nil
 		}
+		mockAC.evaluateDBAccessFunc = func(_ context.Context, userID, targetDBID int, requiredLevel string) error {
+			if userID != 7 || requiredLevel != accesscontrol.AccessLevelViewOnly {
+				t.Errorf("unexpected access evaluation: user=%d db=%d level=%s", userID, targetDBID, requiredLevel)
+			}
+			if targetDBID == 1 {
+				return nil
+			}
+			return accesscontrol.ErrDBAccessDenied
+		}
 		mockDBM.listDatabasesFunc = func(ctx context.Context) ([]models.TargetDBInfo, error) {
 			return []models.TargetDBInfo{
 				{
@@ -485,8 +494,8 @@ func TestDBManagementHandlers(t *testing.T) {
 			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 		}
 		body := rec.Body.String()
-		if !strings.Contains(rec.Header().Get("Content-Type"), "application/json") || !strings.Contains(body, `"production_pg"`) || !strings.Contains(body, `"analytics_pg"`) {
-			t.Errorf("expected production_pg and analytics_pg in JSON, got:\n%s", body)
+		if !strings.Contains(rec.Header().Get("Content-Type"), "application/json") || !strings.Contains(body, `"production_pg"`) || strings.Contains(body, `"analytics_pg"`) {
+			t.Errorf("expected filtered production_pg only in JSON, got:\n%s", body)
 		}
 		if strings.Contains(body, "secret-password") || strings.Contains(body, "db-user") || strings.Contains(body, `"User"`) || strings.Contains(body, `"Password"`) {
 			t.Errorf("databases endpoint exposed credentials: %s", body)

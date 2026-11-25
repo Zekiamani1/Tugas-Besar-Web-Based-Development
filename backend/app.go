@@ -57,7 +57,8 @@ func NewAppWithConfig(
 		sessionCookieSecure:  config.Secure,
 	}
 	app.HandleFunc("GET /health", app.handleHealth)
-	app.Handle("GET /databases", middleware.RequireAuth(app, app.handleListDatabases, app.sessionCookieSecure))
+	app.Handle("GET /me", middleware.RequireAuth(app, app.handleMe, app.sessionCookieSecure))
+	app.Handle("GET /databases", middleware.RequireAuth(app, app.handleListAccessibleDatabases, app.sessionCookieSecure))
 	app.Handle("GET /admin/users", middleware.RequireAdminAccess(app, app.handleListUsers, app.sessionCookieSecure))
 	app.Handle("GET /admin/groups", middleware.RequireAdminAccess(app, app.handleListGroups, app.sessionCookieSecure))
 	app.Handle("GET /admin/databases", middleware.RequireAdminAccess(app, app.handleListDatabases, app.sessionCookieSecure))
@@ -96,6 +97,39 @@ func (app *App) setSessionCookie(w http.ResponseWriter, sessionID string, maxAge
 
 func (app *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (app *App) handleMe(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	users, err := app.ListUsers(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "user unavailable")
+		return
+	}
+	var currentUser *models.UserSummary
+	for i := range users {
+		if users[i].ID == userID {
+			currentUser = &users[i]
+			break
+		}
+	}
+	if currentUser == nil {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user": map[string]any{
+			"id":       currentUser.ID,
+			"username": currentUser.Username,
+			"is_admin": currentUser.IsAdmin,
+		},
+	})
 }
 
 func (app *App) handleListUsers(w http.ResponseWriter, r *http.Request) {
@@ -172,12 +206,7 @@ func (app *App) handleListGroups(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"groups": details})
 }
 
-func (app *App) handleListDatabases(w http.ResponseWriter, r *http.Request) {
-	databases, err := app.ListDatabases(r.Context())
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "database list unavailable")
-		return
-	}
+func (app *App) writeDatabaseSummaries(w http.ResponseWriter, databases []models.TargetDBInfo) {
 	type databaseSummary struct {
 		ID     int    `json:"id"`
 		Name   string `json:"name"`
@@ -198,6 +227,41 @@ func (app *App) handleListDatabases(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"databases": summaries})
+}
+
+func (app *App) handleListDatabases(w http.ResponseWriter, r *http.Request) {
+	databases, err := app.ListDatabases(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "database list unavailable")
+		return
+	}
+	app.writeDatabaseSummaries(w, databases)
+}
+
+func (app *App) handleListAccessibleDatabases(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	databases, err := app.ListDatabases(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "database list unavailable")
+		return
+	}
+	accessible := make([]models.TargetDBInfo, 0, len(databases))
+	for _, database := range databases {
+		err := app.EvaluateDBAccess(r.Context(), userID, database.ID, accesscontrol.AccessLevelViewOnly)
+		if errors.Is(err, accesscontrol.ErrDBAccessDenied) {
+			continue
+		}
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "database access unavailable")
+			return
+		}
+		accessible = append(accessible, database)
+	}
+	app.writeDatabaseSummaries(w, accessible)
 }
 
 func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {

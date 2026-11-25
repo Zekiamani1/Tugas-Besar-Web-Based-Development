@@ -16,7 +16,7 @@ type contextKey string
 const userIDContextKey contextKey = "authenticated-user-id"
 
 // helper ambil userid
-func userIDFromContext(ctx context.Context) (int, bool) {
+func UserIDFromContext(ctx context.Context) (int, bool) {
 	userID, ok := ctx.Value(userIDContextKey).(int)
 
 	return userID, ok && userID > 0

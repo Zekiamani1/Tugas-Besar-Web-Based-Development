@@ -12,7 +12,7 @@ import (
 func RequireAdminAccess(ac interfaces.AccessControlService, next http.HandlerFunc, secureCookie ...bool) http.Handler {
 	return RequireAuth(ac, func(w http.ResponseWriter, r *http.Request) {
 		//check admin flag from session
-		userID, ok := userIDFromContext(r.Context())
+		userID, ok := UserIDFromContext(r.Context())
 		if !ok {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -36,7 +36,7 @@ func RequireAdminAccess(ac interfaces.AccessControlService, next http.HandlerFun
 func RequireDBAccess(ac interfaces.AccessControlService, requiredLevel string, next http.HandlerFunc, secureCookie ...bool) http.Handler {
 	return RequireAuth(ac, func(w http.ResponseWriter, r *http.Request) {
 		//check db access level using access control's evaluatedbaccess
-		userID, ok := userIDFromContext(r.Context())
+		userID, ok := UserIDFromContext(r.Context())
 		if !ok {
 			http.Error(w, "unauthorize", http.StatusUnauthorized)
 			return

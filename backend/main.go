@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"wbd/internal/middleware"
 	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/dbmanagement"
 	"wbd/internal/service/migration"
@@ -56,8 +57,14 @@ func main() {
 		port = "8080"
 	}
 
+	corsOriginsRaw := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
+	if corsOriginsRaw == "" {
+		corsOriginsRaw = "http://localhost:3000"
+	}
+	handler := middleware.CORS(strings.Split(corsOriginsRaw, ","), app)
+
 	log.Printf("server listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, app); err != nil {
+	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		log.Printf("server stopped: %v", err)
 	}
 }
