@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm/clause"
@@ -22,13 +25,16 @@ import (
 )
 
 const (
-	StatusDraft     = "DRAFT"
-	StatusApplied   = "APPLIED"
-	StatusFailed    = "FAILED"
-	StatusRunning   = "RUNNING"
-	StatusUncertain = "UNCERTAIN"
-	ActionApply     = "APPLY"
-	upOnlyReason    = "SQL down was not supplied by the M1 SQL-up-only interface."
+	StatusDraft           = "DRAFT"
+	StatusApplied         = "APPLIED"
+	StatusFailed          = "FAILED"
+	StatusRunning         = "RUNNING"
+	StatusUncertain       = "UNCERTAIN"
+	StatusPartial         = "PARTIAL"
+	StatusPartialReverted = "PARTIALLY_REVERTED"
+	StatusCompensated     = "COMPENSATED"
+	ActionApply           = "APPLY"
+	upOnlyReason          = "SQL down was not supplied by the M1 SQL-up-only interface."
 )
 
 var (
@@ -40,10 +46,40 @@ var (
 	ErrHistoryUpdateUncertain = errors.New("target migration committed but history update could not be confirmed; inspect the target database before retrying")
 )
 
+var batchIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+const batchPredicate = "{{batch_predicate}}"
+
+func validateBatchStatement(job models.MigrationJob, query string) error {
+	parts := strings.Split(job.BatchTable, ".")
+	if len(parts) > 2 || len(parts) == 0 || strings.TrimSpace(job.BatchTable) == "" || !batchIdentifier.MatchString(job.BatchAttribute) {
+		return ErrInvalidJob
+	}
+	for _, part := range parts {
+		if !batchIdentifier.MatchString(part) {
+			return ErrInvalidJob
+		}
+	}
+	if strings.Count(query, batchPredicate) != 1 || strings.Count(query, ";") > 1 || (strings.Contains(query, ";") && !strings.HasSuffix(strings.TrimSpace(query), ";")) {
+		return ErrInvalidJob
+	}
+	return nil
+}
+
+func batchTableSQL(job models.MigrationJob) string {
+	parts := strings.Split(job.BatchTable, ".")
+	for i := range parts {
+		parts[i] = `"` + parts[i] + `"`
+	}
+	return strings.Join(parts, ".")
+}
+
+func batchAttributeSQL(job models.MigrationJob) string { return `"` + job.BatchAttribute + `"` }
+
 type Service struct {
-	Reconcile  JobExecutor
-	internalDB *gorm.DB
-	dbMgmt     interfaces.DBManagementService
+	internalDB   *gorm.DB
+	dbMgmt       interfaces.DBManagementService
+	jobValidator JobValidator
 }
 
 func NewService(internalDB *gorm.DB, dbMgmt interfaces.DBManagementService) *Service {
@@ -52,6 +88,8 @@ func NewService(internalDB *gorm.DB, dbMgmt interfaces.DBManagementService) *Ser
 		dbMgmt:     dbMgmt,
 	}
 }
+
+func (s *Service) SetJobValidator(validate JobValidator) { s.jobValidator = validate }
 
 func lockDatabase(db *gorm.DB, targetDBID int) error {
 	return db.Exec("SELECT pg_advisory_xact_lock(3110, ?)", targetDBID).Error
@@ -267,21 +305,47 @@ func (s *Service) reserveApply(ctx context.Context, targetDBID, migrationID int,
 }
 
 func (s *Service) ExecuteApprovedApply(ctx context.Context, targetDBID, migrationID, revision int, actor string) (*models.MigrationExecution, error) {
+	return s.executeApprovedApply(ctx, 0, targetDBID, migrationID, revision, actor)
+}
+
+func (s *Service) executeApprovedApply(ctx context.Context, jobID, targetDBID, migrationID, revision int, actor string) (*models.MigrationExecution, error) {
 	if targetDBID <= 0 || migrationID <= 0 || revision <= 0 || strings.TrimSpace(actor) == "" {
 		return nil, ErrInvalidMigration
 	}
-	execution, version, err := s.reserveApplyRevision(ctx, targetDBID, migrationID, revision, actor)
+	execution, version, err := s.reserveApplyRevisionForJob(ctx, jobID, targetDBID, migrationID, revision, actor)
 	if err != nil {
 		return nil, err
 	}
-	return s.runAttempt(ctx, execution, version)
+	return s.runAttemptForJob(ctx, execution, version, jobID)
+}
+
+func (s *Service) ExecuteAsyncJob(ctx context.Context, job models.MigrationJob) (*models.MigrationExecution, error) {
+	if job.Action == ActionApply {
+		return s.executeApprovedApply(ctx, job.ID, job.TargetDBID, job.MigrationID, job.Revision, job.Actor)
+	}
+	return s.executeReversal(ctx, job.ID, job.TargetDBID, job.MigrationID, job.ExpectedExecutionID, job.Action, job.Actor)
 }
 
 func (s *Service) reserveApplyRevision(ctx context.Context, targetDBID, migrationID, revision int, executedBy string) (models.MigrationExecution, int, error) {
-	return s.reserveAttempt(ctx, targetDBID, func(meta *gorm.DB) (models.MigrationExecution, int, error) {
+	return s.reserveApplyRevisionForJob(ctx, 0, targetDBID, migrationID, revision, executedBy)
+}
+
+func (s *Service) reserveApplyRevisionForJob(ctx context.Context, jobID, targetDBID, migrationID, revision int, executedBy string) (models.MigrationExecution, int, error) {
+	return s.reserveAttemptForJob(ctx, targetDBID, jobID, func(meta *gorm.DB) (models.MigrationExecution, int, error) {
 		var definition models.Migration
-		if err := unexecuted(meta).Where("id = ? AND target_db_id = ?", migrationID, targetDBID).
-			First(&definition).Error; err != nil {
+		query := meta.Where("id = ? AND target_db_id = ?", migrationID, targetDBID)
+		if jobID == 0 {
+			query = unexecuted(query)
+		} else {
+			var applied int64
+			if err := meta.Model(&models.MigrationExecution{}).Where("migration_id = ? AND target_db_id = ? AND status = ?", migrationID, targetDBID, StatusApplied).Count(&applied).Error; err != nil {
+				return models.MigrationExecution{}, 0, err
+			}
+			if applied > 0 {
+				return models.MigrationExecution{}, 0, ErrDraftNotFound
+			}
+		}
+		if err := query.First(&definition).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return models.MigrationExecution{}, 0, ErrDraftNotFound
 			}
@@ -306,6 +370,10 @@ func (s *Service) reserveApplyRevision(ctx context.Context, targetDBID, migratio
 }
 
 func (s *Service) reserveAttempt(ctx context.Context, targetDBID int, build func(*gorm.DB) (models.MigrationExecution, int, error)) (models.MigrationExecution, int, error) {
+	return s.reserveAttemptForJob(ctx, targetDBID, 0, build)
+}
+
+func (s *Service) reserveAttemptForJob(ctx context.Context, targetDBID, jobID int, build func(*gorm.DB) (models.MigrationExecution, int, error)) (models.MigrationExecution, int, error) {
 	var execution models.MigrationExecution
 	var nextVersion int
 	err := s.internalDB.WithContext(ctx).Transaction(func(meta *gorm.DB) error {
@@ -313,9 +381,17 @@ func (s *Service) reserveAttempt(ctx context.Context, targetDBID int, build func
 			return err
 		}
 		var active int64
-		if err := meta.Model(&models.MigrationExecution{}).
-			Where("target_db_id = ? AND status IN ?", targetDBID, []string{StatusRunning, StatusUncertain}).
-			Count(&active).Error; err != nil {
+		inflight := meta.Model(&models.MigrationExecution{}).Where("target_db_id = ? AND status IN ?", targetDBID, []string{StatusRunning, StatusUncertain, StatusPartial, StatusPartialReverted})
+		if jobID > 0 {
+			var job models.MigrationJob
+			if err := meta.First(&job, jobID).Error; err != nil {
+				return err
+			}
+			if job.Action == ActionRollback && job.Mode == "BATCH" {
+				inflight = inflight.Where("id <> ?", job.ExpectedExecutionID)
+			}
+		}
+		if err := inflight.Count(&active).Error; err != nil {
 			return err
 		}
 		if active > 0 {
@@ -326,7 +402,19 @@ func (s *Service) reserveAttempt(ctx context.Context, targetDBID int, build func
 		if err != nil {
 			return err
 		}
-		return meta.Create(&execution).Error
+		if err := meta.Create(&execution).Error; err != nil {
+			return err
+		}
+		if jobID > 0 {
+			result := meta.Model(&models.MigrationJob{}).Where("id = ? AND status = ?", jobID, StatusRunning).Updates(map[string]any{"execution_id": execution.ID, "planned_version": nextVersion})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return ErrJobConflict
+			}
+		}
+		return nil
 	})
 	return execution, nextVersion, err
 }
@@ -370,6 +458,10 @@ func (s *Service) ExecuteMigration(ctx context.Context, targetDBID, migrationID 
 }
 
 func (s *Service) runAttempt(ctx context.Context, execution models.MigrationExecution, version int) (*models.MigrationExecution, error) {
+	return s.runAttemptForJob(ctx, execution, version, 0)
+}
+
+func (s *Service) runAttemptForJob(ctx context.Context, execution models.MigrationExecution, version, jobID int) (*models.MigrationExecution, error) {
 	fail := func(cause error) (*models.MigrationExecution, error) {
 		if err := s.finishAttempt(ctx, &execution, StatusFailed, 0, cause); err != nil {
 			return nil, errors.Join(cause, fmt.Errorf("record failed execution: %w", err))
@@ -383,23 +475,78 @@ func (s *Service) runAttempt(ctx context.Context, execution models.MigrationExec
 	if conn == nil {
 		return fail(errors.New("target connection is nil"))
 	}
+	txStarted := time.Now()
+	slog.InfoContext(ctx, "migration transaction begin started", "event", "migration.transaction.begin.start", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "actor", execution.ExecutedBy)
 	targetTx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fail(err)
 	}
-	if _, err := targetTx.ExecContext(ctx, execution.SQLSnapshot); err != nil {
-		if rollbackErr := targetTx.Rollback(); rollbackErr != nil {
-			err = errors.Join(err, fmt.Errorf("rollback target migration: %w", rollbackErr))
-		}
-		return fail(err)
+	slog.InfoContext(ctx, "migration transaction begin finished", "event", "migration.transaction.begin.result", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "duration_ms", time.Since(txStarted).Milliseconds())
+	started := time.Now()
+	queryCtx, querySpan := otel.Tracer("wbd/async").Start(ctx, "database.query")
+	attrs := traceLogAttrs(queryCtx)
+	attrs = append(attrs, "event", "migration.sql.start", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "actor", execution.ExecutedBy, "query", redactSQL(execution.SQLSnapshot))
+	slog.InfoContext(queryCtx, "migration SQL started", attrs...)
+	result, execErr := targetTx.ExecContext(queryCtx, execution.SQLSnapshot)
+	rowsAffected := int64(0)
+	if execErr == nil {
+		rowsAffected, _ = result.RowsAffected()
 	}
+	attrs = traceLogAttrs(queryCtx)
+	attrs = append(attrs, "event", "migration.sql.result", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "actor", execution.ExecutedBy, "duration_ms", time.Since(started).Milliseconds(), "rows", rowsAffected, "error", redactSQL(errorString(execErr)), "sqlstate", sqlState(execErr), "parameters", []string{}, "query", redactSQL(execution.SQLSnapshot))
+	slog.InfoContext(queryCtx, "migration SQL finished", attrs...)
+	if execErr != nil {
+		querySpan.RecordError(execErr)
+		querySpan.SetStatus(codes.Error, "migration SQL failed")
+	}
+	querySpan.End()
+	if execErr != nil {
+		rollbackStarted := time.Now()
+		slog.InfoContext(ctx, "migration transaction rollback started", "event", "migration.transaction.rollback.start", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID)
+		if rollbackErr := targetTx.Rollback(); rollbackErr != nil {
+			execErr = errors.Join(execErr, fmt.Errorf("rollback target migration: %w", rollbackErr))
+		} else if jobID > 0 && retryableDatabaseError(execErr) {
+			if err := s.finishAttempt(ctx, &execution, StatusFailed, 0, execErr); err != nil {
+				return nil, errors.Join(execErr, err)
+			}
+			return &execution, ErrRetrySafe
+		}
+		slog.InfoContext(ctx, "migration transaction rollback finished", "event", "migration.transaction.rollback.result", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "duration_ms", time.Since(rollbackStarted).Milliseconds(), "error", redactSQL(errorString(execErr)))
+		return fail(execErr)
+	}
+	if jobID > 0 {
+		if _, err := targetTx.ExecContext(ctx, `INSERT INTO wbd_migration_job_commits(job_id, execution_id, status, committed_at) VALUES ($1,$2,'COMMITTED',now())`, jobID, execution.ID); err != nil {
+			_ = targetTx.Rollback()
+			return fail(err)
+		}
+	}
+	commitStarted := time.Now()
+	slog.InfoContext(ctx, "migration transaction commit started", "event", "migration.transaction.commit.start", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID)
 	if err := targetTx.Commit(); err != nil {
+		if jobID > 0 {
+			if conn, connErr := s.dbMgmt.GetTargetConnection(context.WithoutCancel(ctx), execution.TargetDBID); connErr == nil {
+				if committed, verifyErr := commitEvidence(context.WithoutCancel(ctx), conn, jobID, execution.ID); verifyErr == nil {
+					if committed {
+						if finishErr := s.finishAttempt(ctx, &execution, StatusApplied, version, nil); finishErr == nil {
+							return &execution, nil
+						}
+					} else {
+						if finishErr := s.finishAttempt(ctx, &execution, StatusFailed, 0, err); finishErr != nil {
+							return nil, errors.Join(err, finishErr)
+						}
+						return &execution, ErrRetrySafe
+					}
+				}
+			}
+		}
+		slog.InfoContext(ctx, "migration transaction commit failed", "event", "migration.transaction.commit.result", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "duration_ms", time.Since(commitStarted).Milliseconds(), "error", redactSQL(err.Error()))
 		uncertainErr := fmt.Errorf("%w: %v", ErrTargetCommitUncertain, err)
 		if saveErr := s.finishAttempt(ctx, &execution, StatusUncertain, 0, uncertainErr); saveErr != nil {
 			return nil, errors.Join(uncertainErr, saveErr)
 		}
 		return nil, uncertainErr
 	}
+	slog.InfoContext(ctx, "migration transaction committed", "event", "migration.transaction.commit.result", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "duration_ms", time.Since(commitStarted).Milliseconds(), "status", StatusApplied)
 	if err := s.finishAttempt(ctx, &execution, StatusApplied, version, nil); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrHistoryUpdateUncertain, err)
 	}
@@ -413,34 +560,29 @@ var ErrInvalidJob = errors.New("invalid migration job")
 
 type JobResult struct {
 	Status           string
+	ExecutionID      int64
 	CommittedBatches int64
 	CommittedRows    int64
+	TotalRows        int64
+	Cursor           int64
+	Error            string
 }
 
 type JobExecutor func(context.Context, models.MigrationJob) (JobResult, error)
 type JobValidator func(context.Context, models.MigrationJob) error
-
-func (s *Service) UpdateJobProgress(ctx context.Context, id int, batches, rows int64) error {
-	if id <= 0 || batches < 0 || rows < 0 {
-		return ErrInvalidJob
-	}
-	r := s.internalDB.WithContext(ctx).Model(&models.MigrationJob{}).Where("id = ? AND status = ?", id, "RUNNING").Updates(map[string]any{"committed_batches": batches, "committed_rows": rows})
-	if r.Error != nil {
-		return r.Error
-	}
-	if r.RowsAffected != 1 {
-		return ErrJobConflict
-	}
-	return nil
-}
 
 func jobEvent(ctx context.Context, event string, job models.MigrationJob) {
 	sc := trace.SpanContextFromContext(ctx)
 	slog.Info(event, "event", event, "job_id", job.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "actor", job.Actor, "status", job.Status, "attempt", job.Attempts, "trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
 }
 
+func traceLogAttrs(ctx context.Context) []any {
+	sc := trace.SpanContextFromContext(ctx)
+	return []any{"trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String()}
+}
+
 func (s *Service) SubmitJob(ctx context.Context, job models.MigrationJob) (int, error) {
-	if job.TargetDBID <= 0 || job.MigrationID <= 0 || strings.TrimSpace(job.Actor) == "" || (job.Action != "APPLY" && job.Action != "ROLLBACK" && job.Action != "FORWARD") || (job.Mode != "STANDARD" && job.Mode != "BATCH") || (job.Mode == "BATCH" && job.BatchSize <= 0) || (job.Mode == "STANDARD" && job.BatchSize != 0) {
+	if job.TargetDBID <= 0 || job.MigrationID <= 0 || strings.TrimSpace(job.Actor) == "" || (job.Action != "APPLY" && job.Action != "ROLLBACK" && job.Action != "FORWARD") || (job.Mode != "STANDARD" && job.Mode != "BATCH") || (job.Mode == "BATCH" && (job.BatchSize <= 0 || job.BatchSize > 10000)) || (job.Mode == "STANDARD" && job.BatchSize != 0) {
 		return 0, ErrInvalidJob
 	}
 	if (job.Action == ActionApply && (job.Revision <= 0 || job.ExpectedExecutionID != 0)) || (job.Action != ActionApply && (job.ExpectedExecutionID <= 0 || job.Revision != 0)) {
@@ -457,6 +599,23 @@ func (s *Service) SubmitJob(ctx context.Context, job models.MigrationJob) (int, 
 		if err := tx.Where("id = ? AND target_db_id = ?", job.MigrationID, job.TargetDBID).First(&record).Error; err != nil {
 			return err
 		}
+		query := record.SQLUp
+		if job.Action != ActionApply {
+			var execution models.MigrationExecution
+			if err := tx.Where("id = ? AND migration_id = ? AND target_db_id = ?", job.ExpectedExecutionID, job.MigrationID, job.TargetDBID).First(&execution).Error; err != nil {
+				return err
+			}
+			if job.Action == ActionRollback {
+				query = record.SQLDown
+			}
+		}
+		if job.Mode == "BATCH" {
+			if err := validateBatchStatement(job, query); err != nil {
+				return err
+			}
+		} else if job.BatchTable != "" || job.BatchAttribute != "" {
+			return ErrInvalidJob
+		}
 		var count int64
 		if err := tx.Model(&models.MigrationJob{}).Where("migration_id = ? AND status IN ?", job.MigrationID, []string{"QUEUED", "RUNNING"}).Count(&count).Error; err != nil {
 			return err
@@ -471,6 +630,19 @@ func (s *Service) SubmitJob(ctx context.Context, job models.MigrationJob) (int, 
 	}
 	jobEvent(ctx, "job.queued", job)
 	return job.ID, nil
+}
+
+func retryableDatabaseError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && (pgErr.Code == "40001" || pgErr.Code == "40P01")
+}
+
+func sqlState(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
 }
 
 func (s *Service) FindJob(ctx context.Context, dbID, migrationID, id int) (*models.MigrationJob, error) {

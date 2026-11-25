@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
+	"wbd/internal/models"
 	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/dbmanagement"
 	"wbd/internal/service/migration"
@@ -55,6 +56,13 @@ func main() {
 	dbmSvc := dbmanagement.NewService(internalDB)
 	defer dbmSvc.CloseAllTargetConnections()
 	migSvc := migration.NewService(internalDB, dbmSvc)
+	migSvc.SetJobValidator(func(ctx context.Context, job models.MigrationJob) error {
+		userID, err := strconv.Atoi(job.Actor)
+		if err != nil {
+			return err
+		}
+		return acSvc.EvaluateDBAccess(ctx, userID, job.TargetDBID, accesscontrol.AccessLevelViewEdit)
+	})
 	if err := migSvc.Initialize(context.Background()); err != nil {
 		log.Fatalf("failed to initialize migration history: %v", err)
 	}

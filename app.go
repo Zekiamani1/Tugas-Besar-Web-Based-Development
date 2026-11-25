@@ -1188,6 +1188,9 @@ func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {
 		Action              string `json:"action"`
 		Mode                string `json:"mode"`
 		BatchSize           int    `json:"batch_size"`
+		BatchTable          string `json:"batch_table"`
+		BatchAttribute      string `json:"batch_attribute"`
+		ResumeJobID         int    `json:"resume_job_id"`
 		Revision            int    `json:"revision"`
 		ExpectedExecutionID int    `json:"expected_execution_id"`
 	}
@@ -1217,7 +1220,25 @@ func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, span := otel.Tracer("wbd/async").Start(r.Context(), "api.submit")
 	defer span.End()
-	id, err := jobs.SubmitJob(ctx, models.MigrationJob{TargetDBID: dbID, MigrationID: migrationID, Actor: strconv.Itoa(userID), Action: input.Action, Mode: input.Mode, BatchSize: input.BatchSize, Revision: input.Revision, ExpectedExecutionID: input.ExpectedExecutionID})
+	actor := strconv.Itoa(userID)
+	if input.ResumeJobID > 0 {
+		resumer, ok := app.MigrationService.(interface {
+			ResumeJob(context.Context, int, int, int, string) error
+		})
+		if !ok {
+			http.Error(w, "job resume unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := resumer.ResumeJob(ctx, dbID, migrationID, input.ResumeJobID, actor); err != nil {
+			http.Error(w, "job cannot be resumed", http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"job_id": input.ResumeJobID, "status": "QUEUED", "status_url": fmt.Sprintf("/databases/%d/migrations/%d?job_id=%d", dbID, migrationID, input.ResumeJobID)})
+		return
+	}
+	id, err := jobs.SubmitJob(ctx, models.MigrationJob{TargetDBID: dbID, MigrationID: migrationID, Actor: actor, Action: input.Action, Mode: input.Mode, BatchSize: input.BatchSize, BatchTable: input.BatchTable, BatchAttribute: input.BatchAttribute, Revision: input.Revision, ExpectedExecutionID: input.ExpectedExecutionID})
 	if errors.Is(err, migration.ErrInvalidJob) {
 		http.Error(w, "invalid job", http.StatusBadRequest)
 		return

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -10,6 +12,15 @@ import (
 	"wbd/internal/service/interfaces"
 	"wbd/internal/service/migration"
 )
+
+var ErrApprovedMigrationQueueIntegration = errors.New("approved migration queue integration is pending")
+
+// QueueApprovedMigration is the handoff point for the approval implementation.
+func (app *App) QueueApprovedMigration(ctx context.Context, submission interfaces.MigrationSubmission, approvalID string) (int, error) {
+	// TODO: Call this only after the approval service has persisted its approved decision.
+	// Persist approvalID with the job, then publish that job through the existing publisher.
+	return 0, ErrApprovedMigrationQueueIntegration
+}
 
 func (app *App) handleSubmitMigration(w http.ResponseWriter, r *http.Request) {
 	actor, ok := middleware.AuthenticatedUserID(r.Context())

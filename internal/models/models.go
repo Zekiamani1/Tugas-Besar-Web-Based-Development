@@ -166,17 +166,26 @@ type MigrationJob struct {
 	ID                  int `gorm:"primaryKey" json:"job_id"`
 	Revision            int
 	ExpectedExecutionID int
+	ExecutionID         int64      `json:"execution_id"`
+	SourceJobID         int        `json:"-"`
 	MigrationID         int        `json:"migration_id"`
 	TargetDBID          int        `gorm:"index" json:"target_db_id"`
 	Actor               string     `json:"-"`
 	Action              string     `json:"action"`
 	Mode                string     `json:"mode"`
 	BatchSize           int        `json:"batch_size"`
+	BatchTable          string     `json:"batch_table,omitempty"`
+	BatchAttribute      string     `json:"batch_attribute,omitempty"`
 	Status              string     `gorm:"index" json:"status"`
 	Attempts            int        `json:"attempts"`
 	PublishFailures     int        `json:"-"`
 	CommittedBatches    int64      `json:"committed_batches"`
 	CommittedRows       int64      `json:"committed_rows"`
+	TotalRows           int64      `json:"total_rows"`
+	Cursor              int64      `json:"cursor"`
+	ErrorMessage        string     `json:"error,omitempty"`
+	ResumedBy           string     `json:"-"`
+	PlannedVersion      int        `json:"-"`
 	PublishedAt         *time.Time `json:"-"`
 	NextAttemptAt       time.Time  `json:"next_attempt_at"`
 	TraceParent         string     `json:"-"`

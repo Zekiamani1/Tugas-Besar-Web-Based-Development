@@ -2,14 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 
 	"wbd/internal/models"
 	"wbd/internal/service/accesscontrol"
@@ -169,6 +173,34 @@ func TestMigrationAppIntegration(t *testing.T) {
 	if rec := request(http.MethodPost, executePath, "", viewerCookie); rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer execute: status=%d", rec.Code)
 	}
+	var rabbitConn *amqp.Connection
+	var queueCancel context.CancelFunc
+	var queueDone chan error
+	if rabbitURL := os.Getenv("RABBITMQ_TEST_URL"); rabbitURL != "" {
+		rabbitConn, err = amqp.Dial(rabbitURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = rabbitConn.Close() })
+		queueCtx, cancel := context.WithCancel(ctx)
+		queueCancel = cancel
+		queueDone = make(chan error, 2)
+		queueName := fmt.Sprintf("migration_app_%d", time.Now().UnixNano())
+		t.Logf("RabbitMQ queue under test: %s", queueName)
+		go func() { queueDone <- mig.RunPublisher(queueCtx, rabbitConn, queueName) }()
+		go func() { queueDone <- mig.RunMigrationWorker(queueCtx, rabbitConn, queueName) }()
+		t.Cleanup(func() {
+			queueCancel()
+			<-queueDone
+			<-queueDone
+			ch, e := rabbitConn.Channel()
+			if e == nil {
+				_, _ = ch.QueueDelete(queueName+".retry", false, false, false)
+				_, _ = ch.QueueDelete(queueName, false, false, false)
+				_ = ch.Close()
+			}
+		})
+	}
 	if rec := request(http.MethodPost, executePath, "", editorCookie); rec.Code != http.StatusSeeOther {
 		t.Fatalf("editor execute: status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -176,16 +208,44 @@ func TestMigrationAppIntegration(t *testing.T) {
 	if err := internalDB.Where("migration_id = ? AND target_db_id = ?", migrationID, targetID).First(&job).Error; err != nil {
 		t.Fatal(err)
 	}
-	if job.Status != "QUEUED" {
+	if job.Status != "QUEUED" && !(rabbitConn != nil && (job.Status == "RUNNING" || job.Status == "SUCCEEDED")) {
 		t.Fatalf("expected queued job, got %s", job.Status)
 	}
-	validate := func(context.Context, models.MigrationJob) error { return nil }
-	execute := func(ctx context.Context, job models.MigrationJob) (migration.JobResult, error) {
-		_, err := mig.ExecuteApprovedApply(ctx, job.TargetDBID, job.MigrationID, job.Revision, job.Actor)
-		return migration.JobResult{}, err
-	}
-	if err := mig.ProcessJob(ctx, job.ID, validate, execute); err != nil {
-		t.Fatal(err)
+	if rabbitConn == nil {
+		validate := func(context.Context, models.MigrationJob) error { return nil }
+		execute := func(ctx context.Context, job models.MigrationJob) (migration.JobResult, error) {
+			_, err := mig.ExecuteApprovedApply(ctx, job.TargetDBID, job.MigrationID, job.Revision, job.Actor)
+			return migration.JobResult{}, err
+		}
+		if err := mig.ProcessJob(ctx, job.ID, validate, execute); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		statusPath := fmt.Sprintf("%s/%d?job_id=%d", basePath, migrationID, job.ID)
+		deadline := time.NewTimer(10 * time.Second)
+		defer deadline.Stop()
+		for {
+			rec := request(http.MethodGet, statusPath, "", editorCookie)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("job status endpoint: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var current models.MigrationJob
+			if err := json.Unmarshal(rec.Body.Bytes(), &current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status == "SUCCEEDED" {
+				job = current
+				break
+			}
+			if current.Status == "FAILED" || current.Status == "UNCERTAIN" {
+				t.Fatalf("RabbitMQ job failed: %+v", current)
+			}
+			select {
+			case <-deadline.C:
+				t.Fatalf("HTTP job status did not reach success: %+v", current)
+			case <-time.After(25 * time.Millisecond):
+			}
+		}
 	}
 	if err := internalDB.First(&job, job.ID).Error; err != nil || job.Status != "SUCCEEDED" {
 		t.Fatalf("job did not succeed: status=%s err=%v", job.Status, err)
