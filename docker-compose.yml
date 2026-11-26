@@ -3,6 +3,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      target: server
     container_name: wbd-backend
     restart: unless-stopped
     env_file:
@@ -55,7 +56,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: ["worker"]
+      target: worker
+    container_name: wbd-worker
     restart: unless-stopped
     env_file:
       - .env

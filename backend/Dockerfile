@@ -1,35 +1,49 @@
 # -----------------------------------------------------------------------------
-# Stage 1: Build binary
+# Stage 1: Download Go modules & build server and worker binaries
 # -----------------------------------------------------------------------------
-FROM golang:alpine AS builder
+FROM golang:alpine AS deps
 
 WORKDIR /app
 
-# Copy application source code and web assets
+COPY go.mod go.sum ./
+RUN go mod download
+
 COPY . .
 
-# Compile static binary with optimizations (-s -w strip debug info)
-# Builds only dependencies required for the server binary (excludes testcontainers)
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/bin/server .
+FROM deps AS build-server
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/bin/server ./cmd/server
+
+FROM deps AS build-worker
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/bin/worker ./cmd/worker
 
 # -----------------------------------------------------------------------------
-# Stage 2: Minimal Production Image
+# Stage 2: Shared minimal runtime base
 # -----------------------------------------------------------------------------
-FROM alpine:3.21
+FROM alpine:3.21 AS runtime-base
 
-# Create non-root user for security best practices
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /app
 
-# Copy root CA certificates from builder stage for secure TLS connections
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=deps /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
-# Copy compiled server binary
-COPY --from=builder /app/bin/server /app/server
+# -----------------------------------------------------------------------------
+# Stage 3: Standalone worker runtime (--target worker)
+# -----------------------------------------------------------------------------
+FROM runtime-base AS worker
 
-# Set ownership to unprivileged user
-RUN chown -R appuser:appgroup /app
+COPY --from=build-worker --chown=appuser:appgroup /app/bin/worker /app/worker
+
+USER appuser
+
+ENTRYPOINT ["/app/worker"]
+
+# -----------------------------------------------------------------------------
+# Stage 4: HTTP API server runtime (--target server, default)
+# -----------------------------------------------------------------------------
+FROM runtime-base AS server
+
+COPY --from=build-server --chown=appuser:appgroup /app/bin/server /app/server
 
 USER appuser
 
