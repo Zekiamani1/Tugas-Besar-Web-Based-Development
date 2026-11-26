@@ -95,6 +95,7 @@ func NewAppWithConfig(
 	app.Handle("PUT /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/explain", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleExplainMigration, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/submit", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleSubmitMigration, app.sessionCookieSecure))
+	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/jobs/{jobID}/resume", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleResumeMigrationJob, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migrations/{migrationID}/reviews/{reviewID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationReview, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/reviews/{reviewID}/decision", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleMigrationReviewDecision, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/execute", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleExecuteMigration, app.sessionCookieSecure))
@@ -1056,6 +1057,87 @@ func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Location", location)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"job_id":     id,
+		"status":     "QUEUED",
+		"status_url": location,
+	})
+}
+
+func (app *App) handleResumeMigrationJob(w http.ResponseWriter, r *http.Request) {
+	actor, ok := middleware.AuthenticatedUserID(r.Context())
+	if !ok {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	dbID, dbErr := strconv.Atoi(r.PathValue("dbID"))
+	migrationID, migErr := strconv.Atoi(r.PathValue("migrationID"))
+	jobID, jobErr := strconv.Atoi(r.PathValue("jobID"))
+	if dbErr != nil || migErr != nil || jobErr != nil || dbID <= 0 || migrationID <= 0 || jobID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid database, migration, or job ID")
+		return
+	}
+	service, ok := app.MigrationService.(interface {
+		FindJob(context.Context, int, int, int) (*models.MigrationJob, error)
+		ResumeJob(context.Context, int, int, int, string) error
+	})
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable, "job resume unavailable")
+		return
+	}
+	job, err := service.FindJob(r.Context(), dbID, migrationID, jobID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		writeJSONError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "unable to read job")
+		return
+	}
+	if job.Mode != "BATCH" || (job.Status != migration.StatusPartial && job.Status != migration.StatusPartialReverted) {
+		writeJSONError(w, http.StatusConflict, "job cannot be resumed")
+		return
+	}
+	if app.migrationApproval != nil {
+		reader, ok := app.migrationApproval.(interfaces.ApprovedMigrationReader)
+		if !ok {
+			writeJSONError(w, http.StatusServiceUnavailable, "migration approval unavailable")
+			return
+		}
+		if job.ApprovalID == "" {
+			writeJSONError(w, http.StatusConflict, "migration approval required before resume")
+			return
+		}
+		approved, err := reader.GetApprovedMigration(r.Context(), job.ApprovalID)
+		if err != nil {
+			writeJSONError(w, http.StatusConflict, "migration approval is no longer valid")
+			return
+		}
+		if approved.TargetDBID != job.TargetDBID ||
+			approved.MigrationID != job.MigrationID ||
+			approved.Action != job.Action ||
+			approved.Mode != job.Mode ||
+			approved.BatchSize != job.BatchSize ||
+			approved.BatchTable != job.BatchTable ||
+			approved.BatchAttribute != job.BatchAttribute ||
+			approved.Revision != job.Revision ||
+			approved.ExpectedExecutionID != job.ExpectedExecutionID {
+			writeJSONError(w, http.StatusConflict, "migration approval does not match job")
+			return
+		}
+	}
+	ctx, span := otel.Tracer("wbd/async").Start(r.Context(), "api.resume")
+	defer span.End()
+	if err := service.ResumeJob(ctx, dbID, migrationID, jobID, strconv.Itoa(actor)); err != nil {
+		if errors.Is(err, migration.ErrJobConflict) {
+			writeJSONError(w, http.StatusConflict, "job cannot be resumed")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "unable to resume job")
+		return
+	}
+	location := fmt.Sprintf("/databases/%d/migrations/%d?job_id=%d", dbID, migrationID, jobID)
+	w.Header().Set("Location", location)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"job_id":     jobID,
 		"status":     "QUEUED",
 		"status_url": location,
 	})
