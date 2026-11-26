@@ -16,6 +16,11 @@ func (s *Service) Initialize(ctx context.Context) error {
 		if err := meta.AutoMigrate(&models.Migration{}, &models.MigrationExecution{}, &models.MigrationJob{}, &migrationReview{}, &migrationReviewGroup{}); err != nil {
 			return err
 		}
+		if meta.Migrator().HasColumn(&models.MigrationJob{}, "requested_by") {
+			if err := meta.Exec("ALTER TABLE migration_jobs ALTER COLUMN requested_by DROP NOT NULL").Error; err != nil {
+				return err
+			}
+		}
 		if err := meta.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS migration_database_inflight_unique
 			ON migration_executions (target_db_id) WHERE status IN ('RUNNING', 'UNCERTAIN')`).Error; err != nil {
 			return err
