@@ -15,6 +15,11 @@ type contextKey string
 
 const userIDContextKey contextKey = "authenticated-user-id"
 
+// AuthenticatedUserID returns the identity established by RequireAuth.
+func AuthenticatedUserID(ctx context.Context) (int, bool) {
+	return UserIDFromContext(ctx)
+}
+
 // helper ambil userid
 func UserIDFromContext(ctx context.Context) (int, bool) {
 	userID, ok := ctx.Value(userIDContextKey).(int)

@@ -149,7 +149,7 @@ func (s *Service) ListGroups(ctx context.Context) ([]models.Group, error) {
 	var groups []models.Group
 	if err := s.db.WithContext(ctx).
 		Model(&models.Group{}).
-		Select("id", "name").
+		Select("id", "name", "leader_id").
 		Order("id ASC").
 		Find(&groups).Error; err != nil {
 		return nil, fmt.Errorf("list groups: %w", err)
@@ -453,6 +453,22 @@ func (s *Service) CreateGroup(ctx context.Context, groupName string) error {
 
 	if tx.Error != nil {
 		return fmt.Errorf("create group: %w", tx.Error)
+	}
+	return nil
+}
+
+func (s *Service) SetGroupLeader(ctx context.Context, groupID, userID int) error {
+	if groupID <= 0 || userID <= 0 {
+		return errors.New("group and user IDs must be positive")
+	}
+	result := s.db.WithContext(ctx).Model(&models.Group{}).
+		Where("id = ? AND EXISTS (SELECT 1 FROM user_groups WHERE group_id = ? AND user_id = ?)", groupID, groupID, userID).
+		Update("leader_id", userID)
+	if result.Error != nil {
+		return fmt.Errorf("set group leader: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("group not found or user is not a group member")
 	}
 	return nil
 }

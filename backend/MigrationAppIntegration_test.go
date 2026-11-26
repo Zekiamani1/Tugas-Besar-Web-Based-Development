@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 
 	"wbd/internal/models"
 	"wbd/internal/service/accesscontrol"
@@ -59,6 +62,7 @@ func TestMigrationAppIntegration(t *testing.T) {
 		t.Fatalf("register target: id=%d err=%v", targetID, err)
 	}
 
+	groupIDs := make(map[string]int)
 	for _, user := range []struct {
 		name  string
 		level string
@@ -83,12 +87,24 @@ func TestMigrationAppIntegration(t *testing.T) {
 		if err := ac.AssignUserToGroup(ctx, storedUser.ID, group.ID); err != nil {
 			t.Fatal(err)
 		}
+		if err := ac.SetGroupLeader(ctx, group.ID, storedUser.ID); err != nil {
+			t.Fatal(err)
+		}
+		groupIDs[user.name] = group.ID
 		if err := ac.SetGroupDBAccess(ctx, group.ID, targetID, user.level); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	app := NewApp(ac, dbm, mig)
+	app := NewAppWithConfig(ac, dbm, mig, CookieConfig{MigrationApproval: mig})
+	jsonRequest := func(path string, body any, cookie *http.Cookie) *httptest.ResponseRecorder {
+		t.Helper()
+		req := newJSONRequest(t, http.MethodPost, path, body)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		return rec
+	}
 	login := func(username string) *http.Cookie {
 		t.Helper()
 		req := newJSONRequest(t, http.MethodPost, "/login", map[string]string{
@@ -180,22 +196,126 @@ func TestMigrationAppIntegration(t *testing.T) {
 	if rec := request(http.MethodPost, executePath, nil, viewerCookie); rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer execute: status=%d", rec.Code)
 	}
-	if rec := request(http.MethodPost, executePath, nil, editorCookie); rec.Code != http.StatusOK {
-		t.Fatalf("editor execute: status=%d body=%s", rec.Code, rec.Body.String())
+	var rabbitConn *amqp.Connection
+	var queueCancel context.CancelFunc
+	var queueDone chan error
+	if rabbitURL := os.Getenv("RABBITMQ_TEST_URL"); rabbitURL != "" {
+		rabbitConn, err = amqp.Dial(rabbitURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = rabbitConn.Close() })
+		queueCtx, cancel := context.WithCancel(ctx)
+		queueCancel = cancel
+		queueDone = make(chan error, 2)
+		queueName := fmt.Sprintf("migration_app_%d", time.Now().UnixNano())
+		t.Logf("RabbitMQ queue under test: %s", queueName)
+		go func() { queueDone <- mig.RunPublisher(queueCtx, rabbitConn, queueName) }()
+		go func() { queueDone <- mig.RunMigrationWorker(queueCtx, rabbitConn, queueName) }()
+		t.Cleanup(func() {
+			queueCancel()
+			<-queueDone
+			<-queueDone
+			ch, e := rabbitConn.Channel()
+			if e == nil {
+				_, _ = ch.QueueDelete(queueName+".retry", false, false, false)
+				_, _ = ch.QueueDelete(queueName, false, false, false)
+				_ = ch.Close()
+			}
+		})
+	}
+	if rec := request(http.MethodPost, executePath, nil, editorCookie); rec.Code != http.StatusConflict {
+		t.Fatalf("direct execution: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	migrationPath := fmt.Sprintf("%s/%d", basePath, migrationID)
+	submitted := jsonRequest(migrationPath+"/submit", map[string]any{"action": "APPLY", "revision": 2}, editorCookie)
+	var review struct {
+		ID string `json:"review_id"`
+	}
+	if err := json.Unmarshal(submitted.Body.Bytes(), &review); submitted.Code != http.StatusAccepted || err != nil || review.ID == "" {
+		t.Fatalf("submission: status=%d body=%s err=%v", submitted.Code, submitted.Body.String(), err)
+	}
+	decisionPath := migrationPath + "/reviews/" + review.ID + "/decision"
+	editorVote := map[string]any{"group_id": groupIDs["editor"], "decision": "APPROVED"}
+	first := jsonRequest(decisionPath, editorVote, editorCookie)
+	if first.Code != http.StatusNoContent || first.Header().Get("Location") != "" {
+		t.Fatalf("first approval: status=%d location=%q", first.Code, first.Header().Get("Location"))
+	}
+	var pendingJobs int64
+	if err := internalDB.Model(&models.MigrationJob{}).Where("migration_id = ?", migrationID).Count(&pendingJobs).Error; err != nil || pendingJobs != 0 {
+		t.Fatalf("jobs before unanimous approval: count=%d err=%v", pendingJobs, err)
+	}
+	viewerVote := map[string]any{"group_id": groupIDs["viewer"], "decision": "APPROVED"}
+	final := jsonRequest(decisionPath, viewerVote, viewerCookie)
+	if final.Code != http.StatusNoContent {
+		t.Fatalf("final approval: status=%d body=%s", final.Code, final.Body.String())
+	}
+	var job models.MigrationJob
+	if err := internalDB.Where("migration_id = ? AND target_db_id = ?", migrationID, targetID).First(&job).Error; err != nil {
+		t.Fatal(err)
+	}
+	statusPath := fmt.Sprintf("%s?job_id=%d", migrationPath, job.ID)
+	if job.ApprovalID != review.ID || final.Header().Get("Location") != statusPath {
+		t.Fatalf("job approval=%q location=%q, want %q and %q", job.ApprovalID, final.Header().Get("Location"), review.ID, statusPath)
+	}
+	replayed := jsonRequest(decisionPath, viewerVote, viewerCookie)
+	if replayed.Code != http.StatusNoContent || replayed.Header().Get("Location") != statusPath {
+		t.Fatalf("replayed approval: status=%d location=%q body=%s", replayed.Code, replayed.Header().Get("Location"), replayed.Body.String())
+	}
+	if job.Status != "QUEUED" && !(rabbitConn != nil && (job.Status == "RUNNING" || job.Status == "SUCCEEDED")) {
+		t.Fatalf("expected queued job, got %s", job.Status)
+	}
+	if rabbitConn == nil {
+		validate := func(context.Context, models.MigrationJob) error { return nil }
+		execute := func(ctx context.Context, job models.MigrationJob) (migration.JobResult, error) {
+			_, err := mig.ExecuteApprovedApply(ctx, job.TargetDBID, job.MigrationID, job.Revision, job.Actor)
+			return migration.JobResult{}, err
+		}
+		if err := mig.ProcessJob(ctx, job.ID, validate, execute); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		deadline := time.NewTimer(10 * time.Second)
+		defer deadline.Stop()
+		for {
+			rec := request(http.MethodGet, statusPath, nil, editorCookie)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("job status endpoint: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var current models.MigrationJob
+			if err := json.Unmarshal(rec.Body.Bytes(), &current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status == "SUCCEEDED" {
+				job = current
+				break
+			}
+			if current.Status == "FAILED" || current.Status == "UNCERTAIN" {
+				t.Fatalf("RabbitMQ job failed: %+v", current)
+			}
+			select {
+			case <-deadline.C:
+				t.Fatalf("HTTP job status did not reach success: %+v", current)
+			case <-time.After(25 * time.Millisecond):
+			}
+		}
+	}
+	if err := internalDB.First(&job, job.ID).Error; err != nil || job.Status != "SUCCEEDED" {
+		t.Fatalf("job did not succeed: status=%s err=%v", job.Status, err)
 	}
 	if !targetDB.Migrator().HasTable("migration_app_example") {
 		t.Fatal("migration did not create the target table")
 	}
 
 	var editor models.User
-	var record models.MigrationRecord
+	var record models.MigrationExecution
 	if err := internalDB.Where("username = ?", "editor").First(&editor).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := internalDB.First(&record, migrationID).Error; err != nil {
+	if err := internalDB.Where("migration_id = ?", migrationID).First(&record).Error; err != nil {
 		t.Fatal(err)
 	}
-	if record.Status != migration.StatusApplied || record.Version != 1 || record.ExecutedBy != strconv.Itoa(editor.ID) || record.ExecutedAt.IsZero() {
+	if record.Status != migration.StatusApplied || record.Version != 1 || record.ExecutedBy != strconv.Itoa(editor.ID) || record.StartedAt.IsZero() {
 		t.Fatalf("unexpected migration history: %+v", record)
 	}
 	if rec := request(http.MethodGet, basePath, nil, editorCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"drafts":[]`) {

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,12 +20,16 @@ import (
 	"time"
 
 	"wbd/internal/models"
+	"wbd/internal/service/dbmanagement"
+	"wbd/internal/service/migration"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 	_ "modernc.org/sqlite"
 )
 
@@ -113,6 +118,7 @@ func setupe2e(t *testing.T) (string, *http.Client, *sql.DB, *sql.DB, string, int
 	serverCmd.Env = append(os.Environ(),
 		fmt.Sprintf("PORT=%d", serverPort),
 		fmt.Sprintf("DATABASE_URL=%s", internalDSN),
+		"RABBITMQ_URL=amqp://guest:guest@localhost:5672/",
 		"SESSION_ABSOLUTE_TTL=2h",
 		"SESSION_IDLE_TIMEOUT=30m",
 		"SESSION_ROTATION_INTERVAL=15m",
@@ -162,12 +168,100 @@ func setupe2e(t *testing.T) (string, *http.Client, *sql.DB, *sql.DB, string, int
 func TestE2E(t *testing.T) {
 	rootT := t
 	serverURL, client, internalDB, targetDB, targetHost, targetPort := setupe2e(t)
-
+	meta, err := gorm.Open(postgres.New(postgres.Config{Conn: internalDB}), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbm := dbmanagement.NewService(meta)
+	t.Cleanup(dbm.CloseAllTargetConnections)
+	mig := migration.NewService(meta, dbm)
+	processJob := func(t *testing.T, id int) {
+		t.Helper()
+		validate := func(context.Context, models.MigrationJob) error { return nil }
+		execute := func(ctx context.Context, job models.MigrationJob) (migration.JobResult, error) {
+			_, err := mig.ExecuteApprovedApply(ctx, job.TargetDBID, job.MigrationID, job.Revision, job.Actor)
+			return migration.JobResult{}, err
+		}
+		if err := mig.ProcessJob(context.Background(), id, validate, execute); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var targetDatabaseID int
 	var sqliteDatabaseID int
 	var mysqlDatabaseID int
 	var devUserID, analystUserID, devGroupID, analystGroupID int
 	var draftID string
+	createMigration := func(t *testing.T, query string) string {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]string{"sql_query": query})
+		response, err := client.Post(fmt.Sprintf("%s/databases/%d/migrations", serverURL, targetDatabaseID), "application/json", bytes.NewReader(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var created struct {
+			ID int `json:"id"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&created); response.StatusCode != http.StatusCreated || err != nil || created.ID <= 0 {
+			t.Fatalf("create migration: status=%d id=%d err=%v", response.StatusCode, created.ID, err)
+		}
+		return strconv.Itoa(created.ID)
+	}
+	analystClient := *client
+	analystClient.Jar, err = cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runApprovedMigration := func(t *testing.T, migrationID string, revision int, expected string) {
+		t.Helper()
+		path := fmt.Sprintf("%s/databases/%d/migrations/%s", serverURL, targetDatabaseID, migrationID)
+		payload, _ := json.Marshal(map[string]any{"action": "APPLY", "revision": revision})
+		response, err := client.Post(path+"/submit", "application/json", bytes.NewReader(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var review struct {
+			ID string `json:"review_id"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&review); response.StatusCode != http.StatusAccepted || err != nil || review.ID == "" {
+			t.Fatalf("submit review: status=%d review=%q err=%v", response.StatusCode, review.ID, err)
+		}
+		decide := func(voter *http.Client, groupID int) string {
+			payload, _ := json.Marshal(map[string]any{"group_id": groupID, "decision": "APPROVED"})
+			response, err := voter.Post(path+"/reviews/"+review.ID+"/decision", "application/json", bytes.NewReader(payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusNoContent {
+				t.Fatalf("group %d approval: status=%d", groupID, response.StatusCode)
+			}
+			return response.Header.Get("Location")
+		}
+		if location := decide(client, devGroupID); location != "" {
+			t.Fatalf("first approval returned a job location: %q", location)
+		}
+		location := decide(&analystClient, analystGroupID)
+		statusURL, err := url.Parse(location)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := strconv.Atoi(statusURL.Query().Get("job_id"))
+		if err != nil || id <= 0 {
+			t.Fatalf("invalid approved job location: %q", location)
+		}
+		processJob(t, id)
+		response, err = client.Get(serverURL + location)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var job models.MigrationJob
+		if err := json.NewDecoder(response.Body).Decode(&job); response.StatusCode != http.StatusOK || err != nil || job.ID != id || job.Status != expected {
+			t.Fatalf("job status response: status=%d job=%+v expected=%s err=%v", response.StatusCode, job, expected, err)
+		}
+	}
 	t.Run("Admin Login", func(t *testing.T) {
 		loginPayload, _ := json.Marshal(map[string]string{
 			"username": "admin_platform",
@@ -336,6 +430,14 @@ func TestE2E(t *testing.T) {
 				t.Fatalf("failed to assign user_id %d to group: status %v", m.userID, resp.StatusCode)
 			}
 			resp.Body.Close()
+			resp, err = client.Post(serverURL+"/admin/groups/leader", "application/json", bytes.NewReader(memberPayload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("failed to assign leader for group %d: status=%d", m.groupID, resp.StatusCode)
+			}
 		}
 	})
 
@@ -397,6 +499,14 @@ func TestE2E(t *testing.T) {
 			t.Fatalf("analyst login failed: status %v", resp.StatusCode)
 		}
 		resp.Body.Close()
+		resp, err = analystClient.Post(serverURL+"/login", "application/json", bytes.NewReader(loginPayload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("analyst approval session: status=%d", resp.StatusCode)
+		}
 	})
 
 	t.Run("Analyst Views Schema List", func(t *testing.T) {
@@ -595,22 +705,7 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("Developer Creates Table Migration Draft", func(t *testing.T) {
-		draft1Payload, _ := json.Marshal(map[string]string{
-			"sql_query": "CREATE TABLE public.produk (id SERIAL PRIMARY KEY, nama TEXT NOT NULL, harga INT NOT NULL);",
-		})
-		resp, err := client.Post(fmt.Sprintf("%s/databases/%d/migrations", serverURL, targetDatabaseID), "application/json", bytes.NewReader(draft1Payload))
-		if err != nil || resp.StatusCode != http.StatusCreated {
-			t.Fatalf("failed to create migration draft: %d", resp.StatusCode)
-		}
-		var created struct {
-			ID int `json:"id"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&created); err != nil || created.ID <= 0 {
-			resp.Body.Close()
-			t.Fatalf("invalid created draft response: %v", err)
-		}
-		draftID = strconv.Itoa(created.ID)
-		resp.Body.Close()
+		draftID = createMigration(t, "CREATE TABLE public.produk (id SERIAL PRIMARY KEY, nama TEXT NOT NULL, harga INT NOT NULL);")
 	})
 
 	t.Run("Developer Edits Table Migration Draft", func(t *testing.T) {
@@ -633,27 +728,12 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("Developer Successfully Executes Table Migration", func(t *testing.T) {
-		execPayload, _ := json.Marshal(map[string]string{"token": "budi_developer"})
-		resp, err := client.Post(fmt.Sprintf("%s/databases/%d/migrations/%s/execute", serverURL, targetDatabaseID, draftID), "application/json", bytes.NewReader(execPayload))
-		if err != nil || resp.StatusCode != http.StatusOK {
-			t.Fatalf("failed to execute migration: %d", resp.StatusCode)
-		}
-		resp.Body.Close()
+		runApprovedMigration(t, draftID, 2, "SUCCEEDED")
 	})
 
 	t.Run("Developer Executes Seed Data Migration", func(t *testing.T) {
-		draft2Payload, _ := json.Marshal(map[string]string{
-			"sql_query": "INSERT INTO public.produk (nama, harga, stok) VALUES ('Laptop ThinkPad', 18500000, 10), ('Keyboard Mechanical', 1200000, 30);",
-		})
-		resp, _ := client.Post(fmt.Sprintf("%s/databases/%d/migrations", serverURL, targetDatabaseID), "application/json", bytes.NewReader(draft2Payload))
-		resp.Body.Close()
-
-		execPayload, _ := json.Marshal(map[string]string{"token": "budi_developer"})
-		resp, _ = client.Post(fmt.Sprintf("%s/databases/%d/migrations/2/execute", serverURL, targetDatabaseID), "application/json", bytes.NewReader(execPayload))
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("failed to execute data migration: %d", resp.StatusCode)
-		}
-		resp.Body.Close()
+		id := createMigration(t, "INSERT INTO public.produk (nama, harga, stok) VALUES ('Laptop ThinkPad', 18500000, 10), ('Keyboard Mechanical', 1200000, 30);")
+		runApprovedMigration(t, id, 1, "SUCCEEDED")
 	})
 
 	t.Run("Display Newly Inserted Data Rows", func(t *testing.T) {
@@ -665,19 +745,9 @@ func TestE2E(t *testing.T) {
 		}
 	})
 
-	t.Run("Failed Migration Execution Returns 500", func(t *testing.T) {
-		badPayload, _ := json.Marshal(map[string]string{
-			"sql_query": "CREATE TABLE public.riwayat_transaksi_temp (id INT); INSERT INTO public.riwayat_transaksi_temp VALUES ('teks_bukan_angka');",
-		})
-		resp, _ := client.Post(fmt.Sprintf("%s/databases/%d/migrations", serverURL, targetDatabaseID), "application/json", bytes.NewReader(badPayload))
-		resp.Body.Close()
-
-		execPayload, _ := json.Marshal(map[string]string{"token": "budi_developer"})
-		resp, _ = client.Post(fmt.Sprintf("%s/databases/%d/migrations/3/execute", serverURL, targetDatabaseID), "application/json", bytes.NewReader(execPayload))
-		if resp.StatusCode != http.StatusInternalServerError {
-			t.Errorf("expected status 500 on failing migration, but got %d", resp.StatusCode)
-		}
-		resp.Body.Close()
+	t.Run("Failed Approved Migration Records Job Failure", func(t *testing.T) {
+		id := createMigration(t, "CREATE TABLE public.riwayat_transaksi_temp (id INT); INSERT INTO public.riwayat_transaksi_temp VALUES ('teks_bukan_angka');")
+		runApprovedMigration(t, id, 1, "FAILED")
 	})
 
 	t.Run("Verify Rollback on Physical Database", func(t *testing.T) {
