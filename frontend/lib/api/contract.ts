@@ -65,6 +65,11 @@ export interface MigrationService {
     migrationId: number,
     input: MigrationSubmissionInput
   ): Promise<ActionResult<{ reviewId: number }>>;
+  resumeJob(
+    dbId: number,
+    migrationId: number,
+    jobId: number
+  ): Promise<ActionResult<{ jobId: number; status: string }>>;
   listPendingReviews(dbId: number): Promise<ActionResult<MigrationReview[]>>;
   getReview(
     dbId: number,
@@ -78,6 +83,7 @@ export interface MigrationService {
     groupId: number,
     decision: MigrationReviewDecision
   ): Promise<ActionResult<{ jobId: number | null; location: string | null }>>;
+  listActiveJobs(dbId: number): Promise<ActionResult<MigrationJob[]>>;
   getJob(
     dbId: number,
     migrationId: number,

@@ -17,9 +17,11 @@ function createFakeMigrationService(
     updateDraft: vi.fn(),
     explainDraft: vi.fn(),
     submitMigration: vi.fn(),
+    resumeJob: vi.fn(),
     listPendingReviews: vi.fn(),
     getReview: vi.fn(),
     decideReview: vi.fn(),
+    listActiveJobs: vi.fn(),
     getJob: vi.fn(),
     ...overrides,
   };
