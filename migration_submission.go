@@ -4,22 +4,52 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 
+	"go.opentelemetry.io/otel"
+
 	"wbd/internal/middleware"
+	"wbd/internal/models"
 	"wbd/internal/service/interfaces"
 	"wbd/internal/service/migration"
 )
 
-var ErrApprovedMigrationQueueIntegration = errors.New("approved migration queue integration is pending")
+var ErrApprovedMigrationQueueIntegration = errors.New("approved migration queue integration unavailable")
 
-// QueueApprovedMigration is the handoff point for the approval implementation.
 func (app *App) QueueApprovedMigration(ctx context.Context, submission interfaces.MigrationSubmission, approvalID string) (int, error) {
-	// TODO: Call this only after the approval service has persisted its approved decision.
-	// Persist approvalID with the job, then publish that job through the existing publisher.
-	return 0, ErrApprovedMigrationQueueIntegration
+	reader, ok := app.migrationApproval.(interfaces.ApprovedMigrationReader)
+	if !ok {
+		return 0, ErrApprovedMigrationQueueIntegration
+	}
+	jobs, ok := app.MigrationService.(interface {
+		SubmitJob(context.Context, models.MigrationJob) (int, error)
+	})
+	if !ok {
+		return 0, ErrApprovedMigrationQueueIntegration
+	}
+	id, err := strconv.Atoi(approvalID)
+	if err != nil || id <= 0 {
+		return 0, migration.ErrApprovalDecision
+	}
+	approvalID = strconv.Itoa(id)
+	approved, err := reader.GetApprovedMigration(ctx, approvalID)
+	if err != nil {
+		return 0, err
+	}
+	if approved != submission {
+		return 0, migration.ErrApprovalDecision
+	}
+	ctx, span := otel.Tracer("wbd/async").Start(ctx, "api.submit")
+	defer span.End()
+	return jobs.SubmitJob(ctx, models.MigrationJob{
+		ApprovalID: approvalID, TargetDBID: approved.TargetDBID, MigrationID: approved.MigrationID,
+		Actor: strconv.Itoa(approved.ActorID), Action: approved.Action, Mode: approved.Mode,
+		BatchSize: approved.BatchSize, BatchTable: approved.BatchTable, BatchAttribute: approved.BatchAttribute,
+		Revision: approved.Revision, ExpectedExecutionID: approved.ExpectedExecutionID,
+	})
 }
 
 func (app *App) handleSubmitMigration(w http.ResponseWriter, r *http.Request) {
@@ -190,9 +220,41 @@ func (app *App) handleMigrationReviewDecision(w http.ResponseWriter, r *http.Req
 		http.Error(w, "migration decision unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if err := service.DecideMigrationReview(r.Context(), review.ID, input.GroupID, actor, input.Decision); err != nil {
-		http.Error(w, "migration decision not permitted", http.StatusConflict)
-		return
+	retryHandoff := false
+	if review.Status == "APPROVED" && input.Decision == "APPROVED" {
+		for _, group := range review.Groups {
+			if group.GroupID == input.GroupID && group.Status == "APPROVED" && group.DecidedBy != nil && *group.DecidedBy == actor {
+				retryHandoff = true
+				break
+			}
+		}
+	}
+	if !retryHandoff {
+		if err := service.DecideMigrationReview(r.Context(), review.ID, input.GroupID, actor, input.Decision); err != nil {
+			http.Error(w, "migration decision not permitted", http.StatusConflict)
+			return
+		}
+		review, ok = app.migrationReviewFromRequest(w, r)
+		if !ok {
+			return
+		}
+	}
+	if review.Status == "APPROVED" {
+		jobID, err := app.QueueApprovedMigration(r.Context(), interfaces.MigrationSubmission{
+			TargetDBID: review.TargetDBID, MigrationID: review.MigrationID, ActorID: review.ActorID,
+			Action: review.Action, Mode: review.Mode, BatchSize: review.BatchSize,
+			BatchTable: review.BatchTable, BatchAttribute: review.BatchAttribute,
+			Revision: review.Revision, ExpectedExecutionID: review.ExpectedExecutionID,
+		}, strconv.Itoa(review.ID))
+		switch {
+		case errors.Is(err, migration.ErrJobConflict), errors.Is(err, migration.ErrStaleRevision), errors.Is(err, migration.ErrApprovalGroupsUnavailable), errors.Is(err, migration.ErrApprovalDecision):
+			http.Error(w, "approved migration cannot be queued", http.StatusConflict)
+			return
+		case err != nil:
+			http.Error(w, "unable to queue approved migration", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Location", fmt.Sprintf("/databases/%d/migrations/%d?job_id=%d", review.TargetDBID, review.MigrationID, jobID))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

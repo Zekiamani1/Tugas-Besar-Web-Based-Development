@@ -62,6 +62,7 @@ func TestMigrationAppIntegration(t *testing.T) {
 		t.Fatalf("register target: id=%d err=%v", targetID, err)
 	}
 
+	groupIDs := make(map[string]int)
 	for _, user := range []struct {
 		name  string
 		level string
@@ -86,12 +87,24 @@ func TestMigrationAppIntegration(t *testing.T) {
 		if err := ac.AssignUserToGroup(ctx, storedUser.ID, group.ID); err != nil {
 			t.Fatal(err)
 		}
+		if err := ac.SetGroupLeader(ctx, group.ID, storedUser.ID); err != nil {
+			t.Fatal(err)
+		}
+		groupIDs[user.name] = group.ID
 		if err := ac.SetGroupDBAccess(ctx, group.ID, targetID, user.level); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	app := NewApp(ac, dbm, mig)
+	app := NewAppWithConfig(ac, dbm, mig, CookieConfig{MigrationApproval: mig})
+	jsonRequest := func(path string, body any, cookie *http.Cookie) *httptest.ResponseRecorder {
+		t.Helper()
+		req := newJSONRequest(t, http.MethodPost, path, body)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		return rec
+	}
 	login := func(username string) *http.Cookie {
 		t.Helper()
 		req := newJSONRequest(t, http.MethodPost, "/login", map[string]string{
@@ -201,12 +214,43 @@ func TestMigrationAppIntegration(t *testing.T) {
 			}
 		})
 	}
-	if rec := request(http.MethodPost, executePath, "", editorCookie); rec.Code != http.StatusSeeOther {
-		t.Fatalf("editor execute: status=%d body=%s", rec.Code, rec.Body.String())
+	if rec := request(http.MethodPost, executePath, "", editorCookie); rec.Code != http.StatusConflict {
+		t.Fatalf("direct execution: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	migrationPath := fmt.Sprintf("%s/%d", basePath, migrationID)
+	submitted := jsonRequest(migrationPath+"/submit", map[string]any{"action": "APPLY", "revision": 2}, editorCookie)
+	var review struct {
+		ID string `json:"review_id"`
+	}
+	if err := json.Unmarshal(submitted.Body.Bytes(), &review); submitted.Code != http.StatusAccepted || err != nil || review.ID == "" {
+		t.Fatalf("submission: status=%d body=%s err=%v", submitted.Code, submitted.Body.String(), err)
+	}
+	decisionPath := migrationPath + "/reviews/" + review.ID + "/decision"
+	editorVote := map[string]any{"group_id": groupIDs["editor"], "decision": "APPROVED"}
+	first := jsonRequest(decisionPath, editorVote, editorCookie)
+	if first.Code != http.StatusNoContent || first.Header().Get("Location") != "" {
+		t.Fatalf("first approval: status=%d location=%q", first.Code, first.Header().Get("Location"))
+	}
+	var pendingJobs int64
+	if err := internalDB.Model(&models.MigrationJob{}).Where("migration_id = ?", migrationID).Count(&pendingJobs).Error; err != nil || pendingJobs != 0 {
+		t.Fatalf("jobs before unanimous approval: count=%d err=%v", pendingJobs, err)
+	}
+	viewerVote := map[string]any{"group_id": groupIDs["viewer"], "decision": "APPROVED"}
+	final := jsonRequest(decisionPath, viewerVote, viewerCookie)
+	if final.Code != http.StatusNoContent {
+		t.Fatalf("final approval: status=%d body=%s", final.Code, final.Body.String())
 	}
 	var job models.MigrationJob
 	if err := internalDB.Where("migration_id = ? AND target_db_id = ?", migrationID, targetID).First(&job).Error; err != nil {
 		t.Fatal(err)
+	}
+	statusPath := fmt.Sprintf("%s?job_id=%d", migrationPath, job.ID)
+	if job.ApprovalID != review.ID || final.Header().Get("Location") != statusPath {
+		t.Fatalf("job approval=%q location=%q, want %q and %q", job.ApprovalID, final.Header().Get("Location"), review.ID, statusPath)
+	}
+	replayed := jsonRequest(decisionPath, viewerVote, viewerCookie)
+	if replayed.Code != http.StatusNoContent || replayed.Header().Get("Location") != statusPath {
+		t.Fatalf("replayed approval: status=%d location=%q body=%s", replayed.Code, replayed.Header().Get("Location"), replayed.Body.String())
 	}
 	if job.Status != "QUEUED" && !(rabbitConn != nil && (job.Status == "RUNNING" || job.Status == "SUCCEEDED")) {
 		t.Fatalf("expected queued job, got %s", job.Status)
@@ -221,7 +265,6 @@ func TestMigrationAppIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	} else {
-		statusPath := fmt.Sprintf("%s/%d?job_id=%d", basePath, migrationID, job.ID)
 		deadline := time.NewTimer(10 * time.Second)
 		defer deadline.Stop()
 		for {

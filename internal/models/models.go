@@ -164,7 +164,8 @@ type GroupDBAccess struct {
 }
 
 type MigrationJob struct {
-	ID                  int `gorm:"primaryKey" json:"job_id"`
+	ID                  int    `gorm:"primaryKey" json:"job_id"`
+	ApprovalID          string `gorm:"uniqueIndex:migration_jobs_approval_id_unique,where:approval_id <> ''" json:"-"`
 	Revision            int
 	ExpectedExecutionID int
 	ExecutionID         int64      `json:"execution_id"`

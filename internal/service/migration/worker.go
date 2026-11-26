@@ -172,6 +172,11 @@ func (s *Service) RunMigrationWorker(ctx context.Context, conn *amqp.Connection,
 }
 
 func (s *Service) validateAsyncJob(ctx context.Context, job models.MigrationJob) error {
+	if job.ApprovalID != "" && job.Status == "QUEUED" && job.Attempts == 0 {
+		if _, err := s.GetApprovedMigration(ctx, job.ApprovalID); err != nil {
+			return err
+		}
+	}
 	if s.jobValidator != nil {
 		if err := s.jobValidator(ctx, job); err != nil {
 			return err

@@ -591,9 +591,25 @@ func (s *Service) SubmitJob(ctx context.Context, job models.MigrationJob) (int, 
 	carrier := propagation.MapCarrier{}
 	propagation.TraceContext{}.Inject(ctx, carrier)
 	job.ID, job.Status, job.TraceParent = 0, "QUEUED", carrier.Get("traceparent")
+	reused := false
 	err := s.internalDB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Exec("SELECT pg_advisory_xact_lock(3112, ?)", job.MigrationID).Error; err != nil {
 			return err
+		}
+		if job.ApprovalID != "" {
+			var existing models.MigrationJob
+			err := tx.Where("approval_id = ?", job.ApprovalID).Take(&existing).Error
+			if err == nil {
+				if existing.TargetDBID != job.TargetDBID || existing.MigrationID != job.MigrationID {
+					return ErrInvalidJob
+				}
+				job = existing
+				reused = true
+				return nil
+			}
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
 		}
 		var record models.Migration
 		if err := tx.Where("id = ? AND target_db_id = ?", job.MigrationID, job.TargetDBID).First(&record).Error; err != nil {
@@ -628,7 +644,9 @@ func (s *Service) SubmitJob(ctx context.Context, job models.MigrationJob) (int, 
 	if err != nil {
 		return 0, err
 	}
-	jobEvent(ctx, "job.queued", job)
+	if !reused {
+		jobEvent(ctx, "job.queued", job)
+	}
 	return job.ID, nil
 }
 

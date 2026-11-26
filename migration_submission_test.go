@@ -9,7 +9,9 @@ import (
 	"testing"
 
 	"wbd/internal/middleware"
+	"wbd/internal/models"
 	"wbd/internal/service/interfaces"
+	"wbd/internal/service/migration"
 )
 
 type reviewAPIStub struct {
@@ -69,6 +71,61 @@ type submitMigrationFunc func(context.Context, interfaces.MigrationSubmission) (
 
 func (f submitMigrationFunc) SubmitMigration(ctx context.Context, input interfaces.MigrationSubmission) (string, error) {
 	return f(ctx, input)
+}
+
+type approvedMigrationStub struct {
+	submitMigrationFunc
+	read func(context.Context, string) (interfaces.MigrationSubmission, error)
+}
+
+func (s approvedMigrationStub) GetApprovedMigration(ctx context.Context, id string) (interfaces.MigrationSubmission, error) {
+	return s.read(ctx, id)
+}
+
+func TestQueueApprovedMigration(t *testing.T) {
+	submission := interfaces.MigrationSubmission{
+		TargetDBID: 1, MigrationID: 2, ActorID: 7, Action: migration.ActionRollback, Mode: "BATCH",
+		BatchSize: 25, BatchTable: "public.items", BatchAttribute: "id", ExpectedExecutionID: 9,
+	}
+	for _, tc := range []struct {
+		name       string
+		inputActor int
+		readError  error
+		wantError  error
+	}{
+		{name: "approved", inputActor: 7},
+		{name: "pending or rejected", inputActor: 7, readError: migration.ErrApprovalDecision, wantError: migration.ErrApprovalDecision},
+		{name: "submission differs", inputActor: 8, wantError: migration.ErrApprovalDecision},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			approval := approvedMigrationStub{read: func(_ context.Context, id string) (interfaces.MigrationSubmission, error) {
+				if id != "4" {
+					t.Fatalf("approval ID=%q", id)
+				}
+				return submission, tc.readError
+			}}
+			jobs := &mockMigrationService{submitJobFunc: func(_ context.Context, job models.MigrationJob) (int, error) {
+				if tc.wantError != nil {
+					t.Fatal("invalid approval reached the job submitter")
+				}
+				want := models.MigrationJob{
+					ApprovalID: "4", TargetDBID: 1, MigrationID: 2, Actor: "7", Action: migration.ActionRollback,
+					Mode: "BATCH", BatchSize: 25, BatchTable: "public.items", BatchAttribute: "id", ExpectedExecutionID: 9,
+				}
+				if job != want {
+					t.Fatalf("job=%+v, want %+v", job, want)
+				}
+				return 12, nil
+			}}
+			app := NewAppWithConfig(nil, nil, jobs, CookieConfig{MigrationApproval: approval})
+			input := submission
+			input.ActorID = tc.inputActor
+			id, err := app.QueueApprovedMigration(context.Background(), input, "4")
+			if !errors.Is(err, tc.wantError) || (tc.wantError == nil && id != 12) || (tc.wantError != nil && id != 0) {
+				t.Fatalf("job ID=%d error=%v", id, err)
+			}
+		})
+	}
 }
 
 func TestMigrationSubmission(t *testing.T) {
