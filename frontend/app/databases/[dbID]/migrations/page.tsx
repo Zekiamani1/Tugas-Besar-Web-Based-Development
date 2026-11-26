@@ -95,6 +95,7 @@ export default async function MigrationsPage({
   let history: MigrationRecord[] = [];
   let position: MigrationPosition = { activeHead: null, nextForward: null };
   let pendingReviews: MigrationReview[] = [];
+  let activeJobs: MigrationJob[] = [];
   let initialJob: MigrationJob | null = null;
 
   try {
@@ -104,6 +105,7 @@ export default async function MigrationsPage({
       history,
       position,
       pendingReviews,
+      activeJobs,
       initialJob,
     } = await loadMigrationsData(parsedDbId, {
       hideRollback,
@@ -143,6 +145,7 @@ export default async function MigrationsPage({
         initialHistory={history}
         initialPosition={position}
         initialPendingReviews={pendingReviews}
+        initialActiveJobs={activeJobs}
         initialHideRollback={hideRollback}
         initialJob={initialJob}
         initialSelectedId={selectedId}

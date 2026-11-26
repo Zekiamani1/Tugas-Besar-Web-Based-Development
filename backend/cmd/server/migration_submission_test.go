@@ -186,3 +186,174 @@ func TestDirectMigrationExecutionBlockedWithApproval(t *testing.T) {
 		t.Fatalf("direct execution response: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestResumeMigrationJob(t *testing.T) {
+	ac := &mockAccessControlService{
+		validateSessionFunc:  func(context.Context, string) (int, error) { return 7, nil },
+		evaluateDBAccessFunc: func(context.Context, int, int, string) error { return nil },
+	}
+	baseSubmission := interfaces.MigrationSubmission{
+		TargetDBID: 1, MigrationID: 2, ActorID: 5, Action: migration.ActionApply, Mode: "BATCH",
+		BatchSize: 100, BatchTable: "public.items", BatchAttribute: "id", Revision: 1,
+	}
+	rollbackSubmission := interfaces.MigrationSubmission{
+		TargetDBID: 1, MigrationID: 2, ActorID: 5, Action: migration.ActionRollback, Mode: "BATCH",
+		BatchSize: 100, BatchTable: "public.items", BatchAttribute: "id", ExpectedExecutionID: 9,
+	}
+	for _, tc := range []struct {
+		name       string
+		job        *models.MigrationJob
+		read       func(context.Context, string) (interfaces.MigrationSubmission, error)
+		status     int
+		wantResume bool
+	}{
+		{
+			name:       "partial batch apply job with valid approval",
+			job:        &models.MigrationJob{ID: 15, ApprovalID: "4", TargetDBID: 1, MigrationID: 2, Action: migration.ActionApply, Mode: "BATCH", BatchSize: 100, BatchTable: "public.items", BatchAttribute: "id", Revision: 1, Status: migration.StatusPartial},
+			read:       func(context.Context, string) (interfaces.MigrationSubmission, error) { return baseSubmission, nil },
+			status:     http.StatusAccepted,
+			wantResume: true,
+		},
+		{
+			name:       "partially reverted batch rollback job with valid approval",
+			job:        &models.MigrationJob{ID: 15, ApprovalID: "8", TargetDBID: 1, MigrationID: 2, Action: migration.ActionRollback, Mode: "BATCH", BatchSize: 100, BatchTable: "public.items", BatchAttribute: "id", ExpectedExecutionID: 9, Status: migration.StatusPartialReverted},
+			read:       func(context.Context, string) (interfaces.MigrationSubmission, error) { return rollbackSubmission, nil },
+			status:     http.StatusAccepted,
+			wantResume: true,
+		},
+		{
+			name:       "missing approval ID rejected",
+			job:        &models.MigrationJob{ID: 15, TargetDBID: 1, MigrationID: 2, Action: migration.ActionApply, Mode: "BATCH", BatchSize: 100, BatchTable: "public.items", BatchAttribute: "id", Revision: 1, Status: migration.StatusPartial},
+			status:     http.StatusConflict,
+			wantResume: false,
+		},
+		{
+			name: "invalid or stale approval rejected",
+			job:  &models.MigrationJob{ID: 15, ApprovalID: "4", TargetDBID: 1, MigrationID: 2, Action: migration.ActionApply, Mode: "BATCH", BatchSize: 100, BatchTable: "public.items", BatchAttribute: "id", Revision: 1, Status: migration.StatusPartial},
+			read: func(context.Context, string) (interfaces.MigrationSubmission, error) {
+				return interfaces.MigrationSubmission{}, migration.ErrApprovalGroupsUnavailable
+			},
+			status:     http.StatusConflict,
+			wantResume: false,
+		},
+		{
+			name: "mismatched approval rejected",
+			job:  &models.MigrationJob{ID: 15, ApprovalID: "4", TargetDBID: 1, MigrationID: 2, Action: migration.ActionApply, Mode: "BATCH", BatchSize: 100, BatchTable: "public.items", BatchAttribute: "id", Revision: 1, Status: migration.StatusPartial},
+			read: func(context.Context, string) (interfaces.MigrationSubmission, error) {
+				mismatched := baseSubmission
+				mismatched.BatchTable = "public.other_items"
+				return mismatched, nil
+			},
+			status:     http.StatusConflict,
+			wantResume: false,
+		},
+		{
+			name:       "non-resumable job status rejected",
+			job:        &models.MigrationJob{ID: 15, ApprovalID: "4", TargetDBID: 1, MigrationID: 2, Action: migration.ActionApply, Mode: "BATCH", Status: "SUCCEEDED"},
+			status:     http.StatusConflict,
+			wantResume: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resumed := false
+			jobs := &mockMigrationService{
+				findJobFunc: func(context.Context, int, int, int) (*models.MigrationJob, error) { return tc.job, nil },
+				resumeJobFunc: func(_ context.Context, dbID, migID, jobID int, actor string) error {
+					if dbID != 1 || migID != 2 || jobID != 15 || actor != "7" {
+						t.Fatalf("unexpected resume args: %d %d %d %s", dbID, migID, jobID, actor)
+					}
+					resumed = true
+					return nil
+				},
+			}
+			approval := approvedMigrationStub{read: tc.read}
+			app := NewAppWithConfig(ac, nil, jobs, CookieConfig{MigrationApproval: approval})
+			req := httptest.NewRequest(http.MethodPost, "/databases/1/migrations/2/jobs/15/resume", nil)
+			req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "session"})
+			rec := httptest.NewRecorder()
+			app.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d %s, want %d", rec.Code, rec.Body.String(), tc.status)
+			}
+			if resumed != tc.wantResume {
+				t.Fatalf("resumed=%v, want %v", resumed, tc.wantResume)
+			}
+			if tc.status == http.StatusAccepted {
+				wantLocation := "/databases/1/migrations/2?job_id=15"
+				if rec.Header().Get("Location") != wantLocation {
+					t.Fatalf("location=%q, want %q", rec.Header().Get("Location"), wantLocation)
+				}
+				body := strings.TrimSpace(rec.Body.String())
+				if !strings.Contains(body, `"job_id":15`) || !strings.Contains(body, `"status":"QUEUED"`) || !strings.Contains(body, `"status_url":"`+wantLocation+`"`) {
+					t.Fatalf("unexpected body=%s", body)
+				}
+			}
+		})
+	}
+}
+
+func TestListActiveMigrationJobs(t *testing.T) {
+	ac := &mockAccessControlService{
+		validateSessionFunc:  func(context.Context, string) (int, error) { return 7, nil },
+		evaluateDBAccessFunc: func(context.Context, int, int, string) error { return nil },
+	}
+	for _, tc := range []struct {
+		name      string
+		path      string
+		jobs      []models.MigrationJob
+		err       error
+		status    int
+		wantSubstr string
+	}{
+		{
+			name: "returns queued and partial jobs for view user",
+			path: "/databases/1/migrations/jobs",
+			jobs: []models.MigrationJob{
+				{ID: 45, TargetDBID: 1, MigrationID: 8, Action: migration.ActionApply, Mode: "STANDARD", Status: "QUEUED"},
+				{ID: 44, TargetDBID: 1, MigrationID: 7, Action: migration.ActionApply, Mode: "BATCH", Status: migration.StatusPartial},
+			},
+			status:     http.StatusOK,
+			wantSubstr: `"job_id":44`,
+		},
+		{
+			name:       "nil slice serialized as empty json array",
+			path:       "/databases/1/migrations/jobs",
+			jobs:       nil,
+			status:     http.StatusOK,
+			wantSubstr: `[]`,
+		},
+		{
+			name:   "invalid dbID returns 400",
+			path:   "/databases/0/migrations/jobs",
+			status: http.StatusBadRequest,
+		},
+		{
+			name:   "service error returns 500",
+			path:   "/databases/1/migrations/jobs",
+			err:    errors.New("db unavailable"),
+			status: http.StatusInternalServerError,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobs := &mockMigrationService{
+				listActiveJobsFunc: func(_ context.Context, dbID int) ([]models.MigrationJob, error) {
+					if dbID != 1 {
+						t.Fatalf("unexpected dbID=%d", dbID)
+					}
+					return tc.jobs, tc.err
+				},
+			}
+			app := NewAppWithConfig(ac, nil, jobs, CookieConfig{})
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "session"})
+			rec := httptest.NewRecorder()
+			app.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d %s, want %d", rec.Code, rec.Body.String(), tc.status)
+			}
+			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+				t.Fatalf("body=%s, want substring %q", rec.Body.String(), tc.wantSubstr)
+			}
+		})
+	}
+}

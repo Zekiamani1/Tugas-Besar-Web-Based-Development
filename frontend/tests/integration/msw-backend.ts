@@ -75,7 +75,14 @@ interface StoredJob {
   batch_size: number;
   batch_table?: string;
   batch_attribute?: string;
-  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  status:
+    | "QUEUED"
+    | "RUNNING"
+    | "SUCCEEDED"
+    | "FAILED"
+    | "PARTIAL"
+    | "PARTIALLY_REVERTED"
+    | "UNCERTAIN";
   attempts: number;
   committed_batches: number;
   committed_rows: number;
@@ -868,6 +875,30 @@ export function createMswBackend() {
     ),
 
     http.get(
+      `${TEST_BACKEND_URL}/databases/:dbID/migrations/jobs`,
+      ({ request, params }) => {
+        const auth = requireDb(request, params.dbID, "VIEW_ONLY");
+        if ("error" in auth) return auth.error;
+        const activeStatuses = new Set<StoredJob["status"]>([
+          "QUEUED",
+          "RUNNING",
+          "PARTIAL",
+          "PARTIALLY_REVERTED",
+          "UNCERTAIN",
+        ]);
+        const jobs = state.jobs
+          .filter(
+            (j) => j.target_db_id === auth.dbId && activeStatuses.has(j.status)
+          )
+          .sort((a, b) => b.job_id - a.job_id);
+        return HttpResponse.json(jobs, {
+          status: 200,
+          headers: withSessionRotation({}, auth.rotatedToken),
+        });
+      }
+    ),
+
+    http.get(
       `${TEST_BACKEND_URL}/databases/:dbID/migration-reviews`,
       ({ request, params }) => {
         const auth = requireDb(request, params.dbID, "VIEW_ONLY");
@@ -1383,6 +1414,56 @@ export function createMswBackend() {
         }
 
         return new HttpResponse(null, { status: 204, headers });
+      }
+    ),
+
+    http.post(
+      `${TEST_BACKEND_URL}/databases/:dbID/migrations/:migrationID/jobs/:jobID/resume`,
+      ({ request, params }) => {
+        const auth = requireDb(request, params.dbID, "VIEW_EDIT");
+        if ("error" in auth) return auth.error;
+        const migrationId = Number.parseInt(String(params.migrationID), 10);
+        const jobId = Number.parseInt(String(params.jobID), 10);
+        const job = state.jobs.find(
+          (j) =>
+            j.target_db_id === auth.dbId &&
+            j.migration_id === migrationId &&
+            j.job_id === jobId
+        );
+        if (!job) {
+          return new HttpResponse("job not found", { status: 404 });
+        }
+        if (
+          job.mode !== "BATCH" ||
+          (job.status !== "PARTIAL" && job.status !== "PARTIALLY_REVERTED")
+        ) {
+          return new HttpResponse("job cannot be resumed", { status: 409 });
+        }
+        const reviews = state.reviews.filter(
+          (r) =>
+            r.target_db_id === auth.dbId &&
+            r.migration_id === migrationId &&
+            r.action === job.action
+        );
+        if (
+          reviews.length > 0 &&
+          !reviews.some((r) => r.status === "APPROVED")
+        ) {
+          return new HttpResponse("migration approval is no longer valid", {
+            status: 409,
+          });
+        }
+        job.status = "QUEUED";
+        job.error = undefined;
+        job.updated_at = new Date().toISOString();
+        const location = `/databases/${auth.dbId}/migrations/${migrationId}?job_id=${job.job_id}`;
+        const headers = withSessionRotation({}, auth.rotatedToken);
+        headers.set("Location", location);
+        headers.set("Access-Control-Expose-Headers", "Location");
+        return HttpResponse.json(
+          { job_id: job.job_id, status: "QUEUED", status_url: location },
+          { status: 202, headers }
+        );
       }
     ),
 

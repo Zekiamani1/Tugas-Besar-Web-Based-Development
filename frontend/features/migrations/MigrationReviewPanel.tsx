@@ -37,6 +37,8 @@ export function MigrationReviewPanel({
     initialJob ? String(initialJob.jobId) : ""
   );
   const [jobLookupError, setJobLookupError] = useState<string | null>(null);
+  const [jobResumeError, setJobResumeError] = useState<string | null>(null);
+  const [jobResumeMessage, setJobResumeMessage] = useState<string | null>(null);
 
   const pollingJobId =
     activeJob && !isTerminalJobStatus(activeJob.status)
@@ -146,6 +148,27 @@ export function MigrationReviewPanel({
         `/databases/${dbId}/migrations/${review.migrationId}/reviews/${review.reviewId}?job_id=${parsedJobId}`
       );
     }
+  }
+
+  async function handleResumeJob(job: MigrationJob) {
+    if (!migrationService) return;
+    const res = await migrationService.resumeJob(
+      dbId,
+      job.migrationId,
+      job.jobId
+    );
+    if (!res.ok || !res.data) {
+      setJobResumeError(
+        res.ok ? "Job gagal dilanjutkan." : res.error
+      );
+      setJobResumeMessage(null);
+      return;
+    }
+    setJobResumeError(null);
+    setJobResumeMessage(
+      res.message ?? `Job #${res.data.jobId} berhasil dilanjutkan.`
+    );
+    setActiveJob({ ...job, status: "QUEUED", error: undefined });
   }
 
   return (
@@ -263,6 +286,19 @@ export function MigrationReviewPanel({
                 : null}
             </p>
             <AlertMessage variant="error" message={activeJob.error ?? null} />
+            {activeJob.status === "PARTIAL" ||
+            activeJob.status === "PARTIALLY_REVERTED" ? (
+              <div className="inline-actions">
+                <button
+                  type="button"
+                  onClick={() => void handleResumeJob(activeJob)}
+                >
+                  Resume Job
+                </button>
+              </div>
+            ) : null}
+            <AlertMessage variant="error" message={jobResumeError} />
+            <AlertMessage variant="success" message={jobResumeMessage} />
             {isTerminalJobStatus(activeJob.status) ? (
               <p>
                 <Link

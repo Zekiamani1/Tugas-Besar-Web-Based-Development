@@ -154,6 +154,21 @@ type mockMigrationService struct {
 	getLinearHistoryFunc   func(ctx context.Context, targetDBID int) ([]models.MigrationRecord, error)
 	executeMigrationFunc   func(ctx context.Context, targetDBID, migrationID int, token string) (*models.MigrationRecord, error)
 	submitJobFunc          func(context.Context, models.MigrationJob) (int, error)
+	findJobFunc            func(context.Context, int, int, int) (*models.MigrationJob, error)
+	listActiveJobsFunc     func(context.Context, int) ([]models.MigrationJob, error)
+	resumeJobFunc          func(context.Context, int, int, int, string) error
+}
+
+func (m *mockMigrationService) FindJob(ctx context.Context, dbID, migrationID, jobID int) (*models.MigrationJob, error) {
+	return m.findJobFunc(ctx, dbID, migrationID, jobID)
+}
+
+func (m *mockMigrationService) ListActiveJobs(ctx context.Context, dbID int) ([]models.MigrationJob, error) {
+	return m.listActiveJobsFunc(ctx, dbID)
+}
+
+func (m *mockMigrationService) ResumeJob(ctx context.Context, dbID, migrationID, jobID int, actor string) error {
+	return m.resumeJobFunc(ctx, dbID, migrationID, jobID, actor)
 }
 
 func (m *mockMigrationService) SubmitJob(ctx context.Context, job models.MigrationJob) (int, error) {

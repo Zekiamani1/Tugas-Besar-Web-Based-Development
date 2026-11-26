@@ -131,6 +131,7 @@ function BatchConfigFields({
   batchSize,
   batchTable,
   batchAttribute,
+  lockMode = false,
   onModeChange,
   onBatchSizeChange,
   onBatchTableChange,
@@ -141,6 +142,7 @@ function BatchConfigFields({
   batchSize: string;
   batchTable: string;
   batchAttribute: string;
+  lockMode?: boolean;
   onModeChange: (value: MigrationExecutionMode) => void;
   onBatchSizeChange: (value: string) => void;
   onBatchTableChange: (value: string) => void;
@@ -153,6 +155,7 @@ function BatchConfigFields({
         id={`${idPrefix}-mode`}
         name="mode"
         value={mode}
+        disabled={lockMode}
         onChange={(event) =>
           onModeChange(event.target.value as MigrationExecutionMode)
         }
@@ -222,6 +225,7 @@ export function MigrationManager({
   initialHistory,
   initialPosition = { activeHead: null, nextForward: null },
   initialPendingReviews = [],
+  initialActiveJobs = [],
   initialHideRollback = false,
   initialJob = null,
   initialSelectedId,
@@ -233,6 +237,7 @@ export function MigrationManager({
   initialHistory: MigrationRecord[];
   initialPosition?: MigrationPosition;
   initialPendingReviews?: MigrationReview[];
+  initialActiveJobs?: MigrationJob[];
   initialHideRollback?: boolean;
   initialJob?: MigrationJob | null;
   initialSelectedId?: number;
@@ -288,6 +293,9 @@ export function MigrationManager({
   const [positionAction, setPositionAction] = useState<
     "ROLLBACK" | "FORWARD" | null
   >(null);
+  const [positionTarget, setPositionTarget] = useState<
+    "head" | "partial" | "forward"
+  >("head");
   const [posMode, setPosMode] = useState<MigrationExecutionMode>("STANDARD");
   const [posBatchSize, setPosBatchSize] = useState("");
   const [posBatchTable, setPosBatchTable] = useState("");
@@ -306,19 +314,53 @@ export function MigrationManager({
     null
   );
 
-  const [activeJob, setActiveJob] = useState<MigrationJob | null>(initialJob);
+  const initialMonitoredJob = initialJob ?? initialActiveJobs[0] ?? null;
+  const [activeJobs, setActiveJobs] =
+    useState<MigrationJob[]>(initialActiveJobs);
+  const [activeJob, setActiveJob] = useState<MigrationJob | null>(
+    initialMonitoredJob
+  );
   const [lookupJobId, setLookupJobId] = useState(
-    initialJob ? String(initialJob.jobId) : ""
+    initialMonitoredJob ? String(initialMonitoredJob.jobId) : ""
   );
   const [lookupMigrationId, setLookupMigrationId] = useState(
-    initialJob
-      ? String(initialJob.migrationId)
+    initialMonitoredJob
+      ? String(initialMonitoredJob.migrationId)
       : initialMigration
         ? String(initialMigration.id)
         : ""
   );
   const [jobLookupError, setJobLookupError] = useState<string | null>(null);
+  const [jobResumeMessage, setJobResumeMessage] = useState<string | null>(null);
   const editDirtyRef = useRef(false);
+
+  const partialJob =
+    activeJobs.find(
+      (job) =>
+        job.status === "PARTIAL" && job.action === "APPLY" && job.executionId > 0
+    ) ??
+    (activeJob &&
+    activeJob.status === "PARTIAL" &&
+    activeJob.action === "APPLY" &&
+    activeJob.executionId > 0
+      ? activeJob
+      : null);
+  const partialExecution =
+    [...history]
+      .reverse()
+      .find((item) => item.status === "PARTIAL" && item.action === "APPLY") ??
+    null;
+  const partialTarget = partialJob
+    ? {
+        migrationId: partialJob.migrationId,
+        executionId: partialJob.executionId,
+      }
+    : partialExecution && (partialExecution.executionId ?? 0) > 0
+      ? {
+          migrationId: partialExecution.id,
+          executionId: partialExecution.executionId!,
+        }
+      : null;
 
   const selectedMigration = resolveSelectedMigration({
     canEdit,
@@ -374,9 +416,10 @@ export function MigrationManager({
           const nextJob = res.data;
           setActiveJob(nextJob);
           if (isTerminalJobStatus(nextJob.status)) {
-            const [stateRes, posRes] = await Promise.all([
+            const [stateRes, posRes, jobsRes] = await Promise.all([
               migrationService.listState(dbId, { hideRollback }),
               migrationService.getPosition(dbId),
+              migrationService.listActiveJobs(dbId),
             ]);
             if (!cancelled) {
               if (stateRes.ok && stateRes.data) {
@@ -385,6 +428,9 @@ export function MigrationManager({
               }
               if (posRes.ok && posRes.data) {
                 setPosition(posRes.data);
+              }
+              if (jobsRes.ok && jobsRes.data) {
+                setActiveJobs(jobsRes.data);
               }
             }
           }
@@ -401,6 +447,14 @@ export function MigrationManager({
     pollingJobId,
     pollingMigrationId,
   ]);
+
+  async function refreshActiveJobs() {
+    if (!migrationService) return;
+    const res = await migrationService.listActiveJobs(dbId);
+    if (res.ok && res.data) {
+      setActiveJobs(res.data);
+    }
+  }
 
   async function refreshPendingReviews() {
     if (!migrationService) return;
@@ -644,10 +698,12 @@ export function MigrationManager({
   async function handleSubmitPosition() {
     if (!migrationService || !positionAction) return;
     const targetRef =
-      positionAction === "ROLLBACK"
-        ? position.activeHead
-        : position.nextForward;
-    if (!targetRef) {
+      positionAction === "FORWARD"
+        ? position.nextForward
+        : positionTarget === "partial"
+          ? partialTarget
+          : position.activeHead;
+    if (!targetRef || targetRef.executionId <= 0) {
       setPosError("Target posisi migrasi tidak tersedia.");
       return;
     }
@@ -677,6 +733,33 @@ export function MigrationManager({
     });
     setPositionAction(null);
     void refreshPendingReviews();
+  }
+
+  async function handleResumeJob(job: MigrationJob) {
+    if (!migrationService) return;
+    const res = await migrationService.resumeJob(
+      dbId,
+      job.migrationId,
+      job.jobId
+    );
+    if (!res.ok || !res.data) {
+      setJobLookupError(res.ok ? "Job gagal dilanjutkan." : res.error);
+      setJobResumeMessage(null);
+      return;
+    }
+    setJobLookupError(null);
+    setJobResumeMessage(
+      res.message ?? `Job #${res.data.jobId} berhasil dilanjutkan.`
+    );
+    const resumedJob: MigrationJob = {
+      ...job,
+      status: "QUEUED",
+      error: undefined,
+    };
+    setActiveJob(resumedJob);
+    setActiveJobs((prev) =>
+      prev.map((item) => (item.jobId === job.jobId ? resumedJob : item))
+    );
   }
 
   async function handleReviewDecision(
@@ -719,6 +802,7 @@ export function MigrationManager({
       if (jobRes.ok && jobRes.data) {
         setActiveJob(jobRes.data);
       }
+      void refreshActiveJobs();
       replaceUrl(
         buildMigrationsUrl(dbId, {
           selectedId,
@@ -736,6 +820,7 @@ export function MigrationManager({
       review.reviewId
     );
     if (detailRes.ok && detailRes.data?.status === "APPROVED") {
+      void refreshActiveJobs();
       setReviewNotice(
         "Review telah disetujui seluruh group. Header Location tidak tersedia; masukkan Job ID pada kartu Pemantauan Job jika ingin memantau statusnya."
       );
@@ -760,12 +845,29 @@ export function MigrationManager({
       return;
     }
     setJobLookupError(null);
+    setJobResumeMessage(null);
     setActiveJob(res.data);
     replaceUrl(
       buildMigrationsUrl(dbId, {
         selectedId,
         hideRollback,
         jobId: parsedJobId,
+        tab: activeTab,
+      })
+    );
+  }
+
+  function handleSelectActiveJob(job: MigrationJob) {
+    setJobLookupError(null);
+    setJobResumeMessage(null);
+    setActiveJob(job);
+    setLookupMigrationId(String(job.migrationId));
+    setLookupJobId(String(job.jobId));
+    replaceUrl(
+      buildMigrationsUrl(dbId, {
+        selectedId,
+        hideRollback,
+        jobId: job.jobId,
         tab: activeTab,
       })
     );
@@ -796,6 +898,9 @@ export function MigrationManager({
             <p className="muted">
               Execution ID: {activeJob.executionId || "-"} · Attempts:{" "}
               {activeJob.attempts}
+              {activeJob.mode === "BATCH" && activeJob.batchTable
+                ? ` · Batch: ${activeJob.batchTable}.${activeJob.batchAttribute ?? "-"} (size ${activeJob.batchSize})`
+                : null}
               {activeJob.mode === "BATCH" ||
               activeJob.totalRows > 0 ||
               activeJob.committedBatches > 0
@@ -803,6 +908,19 @@ export function MigrationManager({
                 : null}
             </p>
             <AlertMessage variant="error" message={activeJob.error ?? null} />
+            <AlertMessage variant="success" message={jobResumeMessage} />
+            {canEdit &&
+            (activeJob.status === "PARTIAL" ||
+              activeJob.status === "PARTIALLY_REVERTED") ? (
+              <div className="inline-actions">
+                <button
+                  type="button"
+                  onClick={() => void handleResumeJob(activeJob)}
+                >
+                  Resume Job
+                </button>
+              </div>
+            ) : null}
             {!isTerminalJobStatus(activeJob.status) ? (
               <p className="muted">Memantau progres job secara otomatis...</p>
             ) : null}
@@ -850,6 +968,37 @@ export function MigrationManager({
           <AlertMessage variant="error" message={jobLookupError} />
           <button type="submit">Cek Status Job</button>
         </form>
+
+        {activeJobs.length > 0 ? (
+          <>
+            <h3>Job Belum Selesai</h3>
+            <ul className="item-list">
+              {activeJobs.map((job) => (
+                <li key={`active-job-${job.jobId}`}>
+                  <strong>Job #{job.jobId}</strong>{" "}
+                  <StatusBadge status={job.status} /> · Migration #
+                  {job.migrationId} · Action: {job.action} · Mode: {job.mode}
+                  <br />
+                  <span className="muted">
+                    Execution ID: {job.executionId || "-"}
+                    {job.mode === "BATCH" && job.batchTable
+                      ? ` · Batch: ${job.batchTable}.${job.batchAttribute ?? "-"} (size ${job.batchSize}) · Progress: ${job.committedRows} / ${job.totalRows} rows (${job.committedBatches} batches)`
+                      : null}
+                  </span>
+                  <div className="inline-actions">
+                    <button
+                      type="button"
+                      className="button-subtle"
+                      onClick={() => handleSelectActiveJob(job)}
+                    >
+                      Pantau
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
       </Card>
 
       {activeTab === "migrations" ? (
@@ -867,6 +1016,13 @@ export function MigrationManager({
                 ? `Migration #${position.nextForward.migrationId} · Execution #${position.nextForward.executionId} · Rev ${position.nextForward.revision}`
                 : "Tidak ada."}
             </p>
+            {partialTarget ? (
+              <div className="message error" role="region" aria-label="Status eksekusi partial">
+                <strong>Eksekusi Batch Partial:</strong> Migration #
+                {partialTarget.migrationId} · Execution #
+                {partialTarget.executionId} · <StatusBadge status="PARTIAL" />
+              </div>
+            ) : null}
 
             <AlertMessage variant="error" message={posError} />
             {posReview ? (
@@ -888,7 +1044,12 @@ export function MigrationManager({
                       type="button"
                       className="button-danger"
                       onClick={() => {
+                        setPositionTarget("head");
                         setPositionAction("ROLLBACK");
+                        setPosMode("STANDARD");
+                        setPosBatchSize("");
+                        setPosBatchTable("");
+                        setPosBatchAttribute("");
                         setPosError(null);
                       }}
                     >
@@ -899,11 +1060,37 @@ export function MigrationManager({
                     <button
                       type="button"
                       onClick={() => {
+                        setPositionTarget("forward");
                         setPositionAction("FORWARD");
+                        setPosMode("STANDARD");
+                        setPosBatchSize("");
+                        setPosBatchTable("");
+                        setPosBatchAttribute("");
                         setPosError(null);
                       }}
                     >
                       Ajukan Forward Berikutnya
+                    </button>
+                  ) : null}
+                  {partialTarget ? (
+                    <button
+                      type="button"
+                      className="button-danger"
+                      onClick={() => {
+                        setPositionTarget("partial");
+                        setPositionAction("ROLLBACK");
+                        setPosMode("BATCH");
+                        setPosBatchSize(
+                          partialJob && partialJob.batchSize > 0
+                            ? String(partialJob.batchSize)
+                            : ""
+                        );
+                        setPosBatchTable(partialJob?.batchTable ?? "");
+                        setPosBatchAttribute(partialJob?.batchAttribute ?? "");
+                        setPosError(null);
+                      }}
+                    >
+                      Ajukan Rollback Kompensasi
                     </button>
                   ) : null}
                 </div>
@@ -919,11 +1106,15 @@ export function MigrationManager({
                   >
                     <p>
                       <strong>Pengajuan {positionAction}:</strong>{" "}
-                      {positionAction === "ROLLBACK" && position.activeHead
-                        ? `Migration #${position.activeHead.migrationId} (Execution #${position.activeHead.executionId})`
-                        : positionAction === "FORWARD" && position.nextForward
-                          ? `Migration #${position.nextForward.migrationId} (Execution #${position.nextForward.executionId})`
-                          : "-"}
+                      {positionAction === "ROLLBACK" &&
+                      positionTarget === "partial" &&
+                      partialTarget
+                        ? `Kompensasi Partial Migration #${partialTarget.migrationId} (Execution #${partialTarget.executionId})`
+                        : positionAction === "ROLLBACK" && position.activeHead
+                          ? `Migration #${position.activeHead.migrationId} (Execution #${position.activeHead.executionId})`
+                          : positionAction === "FORWARD" && position.nextForward
+                            ? `Migration #${position.nextForward.migrationId} (Execution #${position.nextForward.executionId})`
+                            : "-"}
                     </p>
                     <BatchConfigFields
                       idPrefix="pos"
@@ -931,6 +1122,7 @@ export function MigrationManager({
                       batchSize={posBatchSize}
                       batchTable={posBatchTable}
                       batchAttribute={posBatchAttribute}
+                      lockMode={positionTarget === "partial"}
                       onModeChange={setPosMode}
                       onBatchSizeChange={setPosBatchSize}
                       onBatchTableChange={setPosBatchTable}

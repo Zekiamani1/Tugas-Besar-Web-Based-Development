@@ -58,9 +58,11 @@ function createFakeMigrationService(
     updateDraft: vi.fn(),
     explainDraft: vi.fn(),
     submitMigration: vi.fn(),
+    resumeJob: vi.fn(),
     listPendingReviews: vi.fn(async () => ({ ok: true as const, data: [] })),
     getReview: vi.fn(),
     decideReview: vi.fn(),
+    listActiveJobs: vi.fn(async () => ({ ok: true as const, data: [] })),
     getJob: vi.fn(),
     ...overrides,
   };
@@ -354,5 +356,153 @@ describe("MigrationManager", () => {
     );
     expect(await screen.findByText(/Job #99/)).toBeInTheDocument();
     expect(screen.getByText("SUCCEEDED")).toBeInTheDocument();
+  });
+
+  it("lists active jobs including QUEUED/PARTIAL and supports resuming and compensating a PARTIAL batch job", async () => {
+    const user = userEvent.setup();
+    const queuedJob = {
+      jobId: 45,
+      executionId: 0,
+      migrationId: 8,
+      targetDbId: 1,
+      action: "APPLY" as const,
+      mode: "STANDARD" as const,
+      batchSize: 0,
+      status: "QUEUED" as const,
+      attempts: 0,
+      committedBatches: 0,
+      committedRows: 0,
+      totalRows: 0,
+      cursor: 0,
+      createdAt: "2026-11-26T00:02:00Z",
+      updatedAt: "2026-11-26T00:02:00Z",
+    };
+    const partialJob = {
+      jobId: 44,
+      executionId: 18,
+      migrationId: 7,
+      targetDbId: 1,
+      action: "APPLY" as const,
+      mode: "BATCH" as const,
+      batchSize: 500,
+      batchTable: "public.orders",
+      batchAttribute: "id",
+      status: "PARTIAL" as const,
+      attempts: 1,
+      committedBatches: 2,
+      committedRows: 1000,
+      totalRows: 2500,
+      cursor: 1000,
+      error: "batch 3 failed",
+      createdAt: "2026-11-26T00:00:00Z",
+      updatedAt: "2026-11-26T00:01:00Z",
+    };
+    const partialHistory: MigrationRecord[] = [
+      ...INITIAL_HISTORY,
+      {
+        id: 7,
+        executionId: 18,
+        action: "APPLY",
+        revision: 1,
+        targetDbId: 1,
+        version: 0,
+        sqlQuery: "UPDATE public.orders SET x = 1 WHERE {{batch_predicate}};",
+        executedBy: "budi_developer",
+        status: "PARTIAL",
+        executedAt: "2026-11-26T00:00:00Z",
+      },
+    ];
+    const getJob = vi.fn<MigrationService["getJob"]>(
+      async (_dbId, _migId, jobId) => ({
+        ok: true,
+        data: jobId === 44 ? partialJob : queuedJob,
+      })
+    );
+    const resumeJob = vi.fn<MigrationService["resumeJob"]>(async () => ({
+      ok: true,
+      message: "Job #44 berhasil dilanjutkan.",
+      data: { jobId: 44, status: "QUEUED" },
+    }));
+    const submitMigration = vi.fn<MigrationService["submitMigration"]>(
+      async () => ({
+        ok: true,
+        message: "Pengajuan review #22 berhasil dibuat.",
+        data: { reviewId: 22 },
+      })
+    );
+    const migrationService = createFakeMigrationService({
+      getJob,
+      resumeJob,
+      submitMigration,
+    });
+
+    render(
+      <Providers services={{ migrations: migrationService }}>
+        <MigrationManager
+          dbId={1}
+          canEdit
+          initialDrafts={[]}
+          initialHistory={partialHistory}
+          initialPosition={{ activeHead: null, nextForward: null }}
+          initialPendingReviews={[]}
+          initialActiveJobs={[queuedJob, partialJob]}
+        />
+      </Providers>
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Job Belum Selesai" })
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/Job #45/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/Job #44/).length).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getAllByText(/Batch: public\.orders\.id \(size 500\)/).length
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/Eksekusi Batch Partial:/)).toBeInTheDocument();
+
+    const pantauButtons = screen.getAllByRole("button", { name: "Pantau" });
+    await user.click(pantauButtons[1]);
+    expect(
+      await screen.findByRole("button", { name: "Resume Job" })
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Ajukan Rollback Kompensasi" })
+    );
+    const posMode = screen.getByLabelText("Mode Eksekusi", {
+      selector: "#pos-mode",
+    });
+    expect(posMode).toHaveValue("BATCH");
+    expect(posMode).toBeDisabled();
+    expect(
+      screen.getByLabelText("Batch Size (1-10000)", { selector: "#pos-batch-size" })
+    ).toHaveValue(500);
+    expect(
+      screen.getByLabelText("Batch Table", { selector: "#pos-batch-table" })
+    ).toHaveValue("public.orders");
+
+    await user.click(
+      screen.getByRole("button", { name: "Submit ROLLBACK Review" })
+    );
+    expect(submitMigration).toHaveBeenCalledWith(1, 7, {
+      action: "ROLLBACK",
+      mode: "BATCH",
+      expectedExecutionId: 18,
+      batchSize: 500,
+      batchTable: "public.orders",
+      batchAttribute: "id",
+    });
+    expect(
+      await screen.findByRole("link", { name: "Buka Review #22" })
+    ).toHaveAttribute("href", "/databases/1/migrations/7/reviews/22");
+
+    await user.click(screen.getByRole("button", { name: "Resume Job" }));
+    expect(resumeJob).toHaveBeenCalledWith(1, 7, 44);
+    expect(
+      await screen.findByText("Job #44 berhasil dilanjutkan.")
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Resume Job" })
+    ).not.toBeInTheDocument();
   });
 });

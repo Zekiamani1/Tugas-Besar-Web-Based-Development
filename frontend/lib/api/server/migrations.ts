@@ -28,6 +28,7 @@ export async function loadMigrationsData(
   history: MigrationRecord[];
   position: MigrationPosition;
   pendingReviews: MigrationReview[];
+  activeJobs: MigrationJob[];
   initialJob: MigrationJob | null;
 }> {
   const normalizedBaseUrl = (options.baseUrl ?? getApiBaseUrl()).replace(
@@ -67,6 +68,16 @@ export async function loadMigrationsData(
     .then((raw) => (Array.isArray(raw) ? raw.map(normalizeReview) : []))
     .catch((): MigrationReview[] => []);
 
+  const activeJobsPromise = requestJson<unknown>(
+    `${normalizedBaseUrl}/databases/${dbId}/migrations/jobs`,
+    {
+      cache: "no-store",
+      cookieHeader: resolvedCookie,
+    }
+  )
+    .then((raw) => (Array.isArray(raw) ? raw.map(normalizeJob) : []))
+    .catch((): MigrationJob[] => []);
+
   const jobPromise =
     options.jobId && options.selectedId
       ? requestJson<unknown>(
@@ -80,12 +91,14 @@ export async function loadMigrationsData(
           .catch(() => null)
       : Promise.resolve(null);
 
-  const [res, position, pendingReviews, initialJob] = await Promise.all([
-    mainPromise,
-    positionPromise,
-    reviewsPromise,
-    jobPromise,
-  ]);
+  const [res, position, pendingReviews, activeJobs, initialJob] =
+    await Promise.all([
+      mainPromise,
+      positionPromise,
+      reviewsPromise,
+      activeJobsPromise,
+      jobPromise,
+    ]);
 
   return {
     canEdit: Boolean(res.can_edit),
@@ -95,6 +108,7 @@ export async function loadMigrationsData(
     ),
     position,
     pendingReviews,
+    activeJobs,
     initialJob,
   };
 }

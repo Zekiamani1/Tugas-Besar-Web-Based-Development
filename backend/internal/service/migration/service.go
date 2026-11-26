@@ -676,6 +676,18 @@ func (s *Service) FindJob(ctx context.Context, dbID, migrationID, id int) (*mode
 	return &job, err
 }
 
+func (s *Service) ListActiveJobs(ctx context.Context, dbID int) ([]models.MigrationJob, error) {
+	if dbID <= 0 {
+		return nil, ErrInvalidMigration
+	}
+	var jobs []models.MigrationJob
+	err := s.internalDB.WithContext(ctx).
+		Where("target_db_id = ? AND status IN ?", dbID, []string{"QUEUED", StatusRunning, StatusPartial, StatusPartialReverted, StatusUncertain}).
+		Order("id DESC").
+		Find(&jobs).Error
+	return jobs, err
+}
+
 func (s *Service) RunPublisher(ctx context.Context, conn *amqp.Connection, queue string) error {
 	ch, err := conn.Channel()
 	if err != nil {

@@ -238,6 +238,42 @@ export const migrationService: MigrationService = {
     }
   },
 
+  async resumeJob(dbId, migrationId, jobId) {
+    if (
+      !Number.isSafeInteger(dbId) ||
+      dbId <= 0 ||
+      !Number.isSafeInteger(migrationId) ||
+      migrationId <= 0 ||
+      !Number.isSafeInteger(jobId) ||
+      jobId <= 0
+    ) {
+      return { ok: false, error: "ID database, migration, atau job tidak valid." };
+    }
+    try {
+      const res = await requestJson<{ job_id?: number; status?: string }>(
+        `/databases/${dbId}/migrations/${migrationId}/jobs/${jobId}/resume`,
+        { method: "POST" }
+      );
+      const resumedJobId = Number(res?.job_id ?? 0);
+      if (!Number.isSafeInteger(resumedJobId) || resumedJobId <= 0) {
+        return { ok: false, error: "Job ID tidak valid." };
+      }
+      return {
+        ok: true,
+        message: `Job #${resumedJobId} berhasil dilanjutkan.`,
+        data: { jobId: resumedJobId, status: res?.status ?? "QUEUED" },
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          err instanceof Error && err.message
+            ? err.message
+            : "Job gagal dilanjutkan.",
+      };
+    }
+  },
+
   async listPendingReviews(dbId) {
     try {
       const res = await requestJson<unknown>(
@@ -315,6 +351,26 @@ export const migrationService: MigrationService = {
           err instanceof Error && err.message
             ? err.message
             : "Keputusan review tidak dapat disimpan.",
+      };
+    }
+  },
+
+  async listActiveJobs(dbId) {
+    try {
+      const res = await requestJson<unknown>(
+        `/databases/${dbId}/migrations/jobs`
+      );
+      return {
+        ok: true,
+        data: Array.isArray(res) ? res.map(normalizeJob) : [],
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          err instanceof Error && err.message
+            ? err.message
+            : "Daftar job aktif gagal dimuat.",
       };
     }
   },
