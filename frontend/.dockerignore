@@ -1,0 +1,14 @@
+node_modules
+.next
+out
+coverage
+.git
+.env
+.env.*
+Dockerfile*
+.dockerignore
+*.tsbuildinfo
+tests
+vitest.config.mts
+vitest.setup.ts
+.DS_Store
