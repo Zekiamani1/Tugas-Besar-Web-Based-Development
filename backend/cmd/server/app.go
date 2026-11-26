@@ -89,6 +89,7 @@ func NewAppWithConfig(
 	app.Handle("GET /databases/{dbID}/migrations/history", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationHistoryJSON, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migration-reviews", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleListPendingMigrationReviews, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migrations/position", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationPosition, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/migrations/jobs", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleListActiveMigrationJobs, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationDetail, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migrations/{migrationID}/definition", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationDefinition, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleCreateMigrationDraft, app.sessionCookieSecure))
@@ -694,6 +695,31 @@ func (app *App) handleGetMigrationPosition(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(position)
+}
+
+func (app *App) handleListActiveMigrationJobs(w http.ResponseWriter, r *http.Request) {
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil || dbID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid dbID")
+		return
+	}
+	lister, ok := app.MigrationService.(interface {
+		ListActiveJobs(context.Context, int) ([]models.MigrationJob, error)
+	})
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable, "job service unavailable")
+		return
+	}
+	jobs, err := lister.ListActiveJobs(r.Context(), dbID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "unable to list active migration jobs")
+		return
+	}
+	if jobs == nil {
+		jobs = make([]models.MigrationJob, 0)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(jobs)
 }
 
 func (app *App) handleGetMigrationDefinition(w http.ResponseWriter, r *http.Request) {

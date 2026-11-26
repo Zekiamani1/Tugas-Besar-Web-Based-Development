@@ -291,3 +291,69 @@ func TestResumeMigrationJob(t *testing.T) {
 		})
 	}
 }
+
+func TestListActiveMigrationJobs(t *testing.T) {
+	ac := &mockAccessControlService{
+		validateSessionFunc:  func(context.Context, string) (int, error) { return 7, nil },
+		evaluateDBAccessFunc: func(context.Context, int, int, string) error { return nil },
+	}
+	for _, tc := range []struct {
+		name      string
+		path      string
+		jobs      []models.MigrationJob
+		err       error
+		status    int
+		wantSubstr string
+	}{
+		{
+			name: "returns queued and partial jobs for view user",
+			path: "/databases/1/migrations/jobs",
+			jobs: []models.MigrationJob{
+				{ID: 45, TargetDBID: 1, MigrationID: 8, Action: migration.ActionApply, Mode: "STANDARD", Status: "QUEUED"},
+				{ID: 44, TargetDBID: 1, MigrationID: 7, Action: migration.ActionApply, Mode: "BATCH", Status: migration.StatusPartial},
+			},
+			status:     http.StatusOK,
+			wantSubstr: `"job_id":44`,
+		},
+		{
+			name:       "nil slice serialized as empty json array",
+			path:       "/databases/1/migrations/jobs",
+			jobs:       nil,
+			status:     http.StatusOK,
+			wantSubstr: `[]`,
+		},
+		{
+			name:   "invalid dbID returns 400",
+			path:   "/databases/0/migrations/jobs",
+			status: http.StatusBadRequest,
+		},
+		{
+			name:   "service error returns 500",
+			path:   "/databases/1/migrations/jobs",
+			err:    errors.New("db unavailable"),
+			status: http.StatusInternalServerError,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobs := &mockMigrationService{
+				listActiveJobsFunc: func(_ context.Context, dbID int) ([]models.MigrationJob, error) {
+					if dbID != 1 {
+						t.Fatalf("unexpected dbID=%d", dbID)
+					}
+					return tc.jobs, tc.err
+				},
+			}
+			app := NewAppWithConfig(ac, nil, jobs, CookieConfig{})
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "session"})
+			rec := httptest.NewRecorder()
+			app.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d %s, want %d", rec.Code, rec.Body.String(), tc.status)
+			}
+			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+				t.Fatalf("body=%s, want substring %q", rec.Body.String(), tc.wantSubstr)
+			}
+		})
+	}
+}
