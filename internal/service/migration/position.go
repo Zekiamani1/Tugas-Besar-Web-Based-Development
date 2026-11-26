@@ -110,11 +110,23 @@ func (s *Service) GetPosition(ctx context.Context, targetDBID int) (Position, er
 }
 
 func (s *Service) ExecuteReversal(ctx context.Context, targetDBID, migrationID, expectedExecutionID int, action, actor string) (*models.MigrationExecution, error) {
+	return s.executeReversal(ctx, 0, targetDBID, migrationID, expectedExecutionID, action, actor)
+}
+
+func (s *Service) executeReversal(ctx context.Context, jobID, targetDBID, migrationID, expectedExecutionID int, action, actor string) (*models.MigrationExecution, error) {
+	execution, version, err := s.reserveReversalAttempt(ctx, jobID, targetDBID, migrationID, expectedExecutionID, action, actor)
+	if err != nil {
+		return nil, err
+	}
+	return s.runAttemptForJob(ctx, execution, version, jobID)
+}
+
+func (s *Service) reserveReversalAttempt(ctx context.Context, jobID, targetDBID, migrationID, expectedExecutionID int, action, actor string) (models.MigrationExecution, int, error) {
 	if targetDBID <= 0 || migrationID <= 0 || expectedExecutionID <= 0 ||
 		strings.TrimSpace(actor) == "" || (action != ActionRollback && action != ActionForward) {
-		return nil, ErrInvalidMigration
+		return models.MigrationExecution{}, 0, ErrInvalidMigration
 	}
-	execution, version, err := s.reserveAttempt(ctx, targetDBID, func(meta *gorm.DB) (models.MigrationExecution, int, error) {
+	execution, version, err := s.reserveAttemptForJob(ctx, targetDBID, jobID, func(meta *gorm.DB) (models.MigrationExecution, int, error) {
 		position, err := loadPosition(meta, targetDBID)
 		if err != nil {
 			return models.MigrationExecution{}, 0, err
@@ -123,10 +135,26 @@ func (s *Service) ExecuteReversal(ctx context.Context, targetDBID, migrationID, 
 		if action == ActionForward {
 			candidates = position.forward
 		}
-		if len(candidates) == 0 {
-			return models.MigrationExecution{}, 0, ErrInvalidPosition
+		var expected models.MigrationExecution
+		var partialSource bool
+		if action == ActionRollback && jobID > 0 {
+			var source models.MigrationJob
+			err := meta.Where("execution_id = ? AND migration_id = ? AND target_db_id = ? AND status = ? AND mode = ?", expectedExecutionID, migrationID, targetDBID, StatusPartial, "BATCH").First(&source).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return models.MigrationExecution{}, 0, err
+			}
+			partialSource = err == nil
 		}
-		expected := candidates[len(candidates)-1]
+		if partialSource {
+			if err := meta.Where("id = ? AND migration_id = ? AND target_db_id = ? AND status = ?", expectedExecutionID, migrationID, targetDBID, StatusPartial).First(&expected).Error; err != nil {
+				return models.MigrationExecution{}, 0, ErrInvalidPosition
+			}
+		} else {
+			if len(candidates) == 0 {
+				return models.MigrationExecution{}, 0, ErrInvalidPosition
+			}
+			expected = candidates[len(candidates)-1]
+		}
 		if expected.ID != expectedExecutionID || expected.MigrationID != migrationID {
 			return models.MigrationExecution{}, 0, ErrInvalidPosition
 		}
@@ -146,11 +174,13 @@ func (s *Service) ExecuteReversal(ctx context.Context, targetDBID, migrationID, 
 			}
 			attempt.SQLSnapshot = definition.SQLDown
 			attempt.RevertsExecutionID = &expected.ID
+		} else {
+			attempt.RevertsExecutionID = &expected.ID
 		}
 		return attempt, expected.Version, nil
 	})
 	if err != nil {
-		return nil, err
+		return models.MigrationExecution{}, 0, err
 	}
-	return s.runAttempt(ctx, execution, version)
+	return execution, version, nil
 }

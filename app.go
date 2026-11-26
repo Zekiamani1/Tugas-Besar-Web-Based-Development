@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel"
 	"gorm.io/gorm"
 	"html/template"
 	"mime"
@@ -83,6 +84,7 @@ func NewAppWithConfig(
 	app.Handle("POST /admin/users", middleware.RequireAdminAccess(app, app.handleRegisterUser, app.sessionCookieSecure))
 	app.Handle("POST /admin/groups", middleware.RequireAdminAccess(app, app.handleCreateGroup, app.sessionCookieSecure))
 	app.Handle("POST /admin/groups/members", middleware.RequireAdminAccess(app, app.handleAssignUserToGroup, app.sessionCookieSecure))
+	app.Handle("POST /admin/groups/leader", middleware.RequireAdminAccess(app, app.handleSetGroupLeader, app.sessionCookieSecure))
 	app.Handle("POST /admin/groups/permissions", middleware.RequireAdminAccess(app, app.handleSetGroupDBAccess, app.sessionCookieSecure))
 	app.Handle("POST /admin/databases", middleware.RequireAdminAccess(app, app.handleRegisterTargetDB, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleDatabaseRedirect, app.sessionCookieSecure))
@@ -93,6 +95,7 @@ func NewAppWithConfig(
 	app.Handle("GET /databases/{dbID}/migrations", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationHistory, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migrations/drafts", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleGetMigrationDraftsJSON, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migrations/history", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationHistoryJSON, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/migration-reviews", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleListPendingMigrationReviews, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migrations/position", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationPosition, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migrations/{migrationID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationDetail, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/migrations/{migrationID}/definition", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationDefinition, app.sessionCookieSecure))
@@ -101,6 +104,8 @@ func NewAppWithConfig(
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/edit", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleUpdateMigrationDraft, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/explain", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleExplainMigration, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/submit", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleSubmitMigration, app.sessionCookieSecure))
+	app.Handle("GET /databases/{dbID}/migrations/{migrationID}/reviews/{reviewID}", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetMigrationReview, app.sessionCookieSecure))
+	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/reviews/{reviewID}/decision", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleMigrationReviewDecision, app.sessionCookieSecure))
 	app.Handle("POST /databases/{dbID}/migrations/{migrationID}/execute", middleware.RequireDBAccess(app, "VIEW_EDIT", app.handleExecuteMigration, app.sessionCookieSecure))
 
 	return app
@@ -498,6 +503,29 @@ func (app *App) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	app.renderAdminPage(w, r, http.StatusOK, adminPageData{Message: fmt.Sprintf("berhasil menambahkan group %s", req.GroupName)})
 }
 
+func (app *App) handleSetGroupLeader(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		GroupID int `json:"group_id"`
+		UserID  int `json:"user_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input); err != nil || input.GroupID <= 0 || input.UserID <= 0 {
+		http.Error(w, "invalid group or user ID", http.StatusBadRequest)
+		return
+	}
+	service, ok := app.AccessControlService.(interface {
+		SetGroupLeader(context.Context, int, int) error
+	})
+	if !ok {
+		http.Error(w, "group leader service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := service.SetGroupLeader(r.Context(), input.GroupID, input.UserID); err != nil {
+		http.Error(w, "unable to assign group leader", http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (app *App) handleAssignUserToGroup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		UserID  int `json:"user_id"`
@@ -886,6 +914,32 @@ func (app *App) handleGetMigrationDetail(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid migrationID", http.StatusBadRequest)
 		return
 	}
+	if value := r.URL.Query().Get("job_id"); value != "" {
+		jobID, err := strconv.Atoi(value)
+		if err != nil || jobID <= 0 {
+			http.Error(w, "invalid job ID", http.StatusBadRequest)
+			return
+		}
+		jobs, ok := app.MigrationService.(interface {
+			FindJob(context.Context, int, int, int) (*models.MigrationJob, error)
+		})
+		if !ok {
+			http.Error(w, "job service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		job, err := jobs.FindJob(r.Context(), dbID, migrationID, jobID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "unable to read job", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(job)
+		return
+	}
 	app.renderMigrationDetail(w, r, dbID, migrationID, http.StatusOK, "", "")
 }
 
@@ -1150,13 +1204,91 @@ func (app *App) handleExecuteMigration(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if _, err := app.ExecuteMigration(r.Context(), dbID, migrationID, strconv.Itoa(userID)); err != nil {
-		if isFormRequest(r) {
-			app.renderMigrationDetail(w, r, dbID, migrationID, http.StatusInternalServerError, "Migration failed. Check the SQL and the target database status.", "")
-		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+	jobs, ok := app.MigrationService.(interface {
+		SubmitJob(context.Context, models.MigrationJob) (int, error)
+	})
+	if !ok {
+		http.Error(w, "job service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	http.Redirect(w, r, fmt.Sprintf("/databases/%d/migrations/%d", dbID, migrationID), http.StatusSeeOther)
+	var input struct {
+		Action              string `json:"action"`
+		Mode                string `json:"mode"`
+		BatchSize           int    `json:"batch_size"`
+		BatchTable          string `json:"batch_table"`
+		BatchAttribute      string `json:"batch_attribute"`
+		ResumeJobID         int    `json:"resume_job_id"`
+		Revision            int    `json:"revision"`
+		ExpectedExecutionID int    `json:"expected_execution_id"`
+	}
+	if isFormRequest(r) {
+		reader, ok := app.MigrationService.(interface {
+			GetDefinition(context.Context, int, int) (models.Migration, error)
+		})
+		if !ok {
+			http.Error(w, "migration definition unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		definition, err := reader.GetDefinition(r.Context(), dbID, migrationID)
+		if err != nil {
+			http.Error(w, "migration not found", http.StatusNotFound)
+			return
+		}
+		input.Revision = definition.Revision
+	} else if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&input); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if input.Action == "" {
+		input.Action = migration.ActionApply
+	}
+	if input.Mode == "" {
+		input.Mode = "STANDARD"
+	}
+	ctx, span := otel.Tracer("wbd/async").Start(r.Context(), "api.submit")
+	defer span.End()
+	actor := strconv.Itoa(userID)
+	if input.ResumeJobID > 0 {
+		resumer, ok := app.MigrationService.(interface {
+			ResumeJob(context.Context, int, int, int, string) error
+		})
+		if !ok {
+			http.Error(w, "job resume unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := resumer.ResumeJob(ctx, dbID, migrationID, input.ResumeJobID, actor); err != nil {
+			http.Error(w, "job cannot be resumed", http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{"job_id": input.ResumeJobID, "status": "QUEUED", "status_url": fmt.Sprintf("/databases/%d/migrations/%d?job_id=%d", dbID, migrationID, input.ResumeJobID)})
+		return
+	}
+	id, err := jobs.SubmitJob(ctx, models.MigrationJob{TargetDBID: dbID, MigrationID: migrationID, Actor: actor, Action: input.Action, Mode: input.Mode, BatchSize: input.BatchSize, BatchTable: input.BatchTable, BatchAttribute: input.BatchAttribute, Revision: input.Revision, ExpectedExecutionID: input.ExpectedExecutionID})
+	if errors.Is(err, migration.ErrInvalidJob) {
+		http.Error(w, "invalid job", http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, migration.ErrJobConflict) {
+		http.Error(w, "job already pending", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		http.Error(w, "migration not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "unable to queue job", http.StatusInternalServerError)
+		return
+	}
+	location := fmt.Sprintf("/databases/%d/migrations/%d?job_id=%d", dbID, migrationID, id)
+	if isFormRequest(r) {
+		http.Redirect(w, r, location, http.StatusSeeOther)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Location", location)
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{"job_id": id, "status": "QUEUED", "status_url": location})
 }

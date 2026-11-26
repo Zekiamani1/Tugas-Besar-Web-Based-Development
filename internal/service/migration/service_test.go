@@ -53,7 +53,7 @@ func expectLock(mock sqlmock.Sqlmock) {
 func expectReservation(mock sqlmock.Sqlmock) {
 	expectLock(mock)
 	mock.ExpectQuery(`SELECT count\(\*\) FROM "migration_executions"`).
-		WithArgs(2, StatusRunning, StatusUncertain).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		WithArgs(2, StatusRunning, StatusUncertain, StatusPartial, StatusPartialReverted).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(`SELECT .*FROM "migrations"`).WithArgs(7, 2, 1).WillReturnRows(definitionRow())
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\)`).WithArgs(2, StatusApplied).
 		WillReturnRows(sqlmock.NewRows([]string{"coalesce"}).AddRow(3))
@@ -265,7 +265,7 @@ func TestExecuteApprovedApplyRejectsStaleRevision(t *testing.T) {
 	svc, mock := newMockService(t, nil)
 	expectLock(mock)
 	mock.ExpectQuery(`SELECT count\(\*\) FROM "migration_executions"`).
-		WithArgs(2, StatusRunning, StatusUncertain).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		WithArgs(2, StatusRunning, StatusUncertain, StatusPartial, StatusPartialReverted).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(`SELECT .*FROM "migrations"`).WithArgs(7, 2, 1).WillReturnRows(definitionRow())
 	mock.ExpectRollback()
 

@@ -52,7 +52,7 @@ type Migration struct {
 	Revision           int    `gorm:"not null;default:1" json:"revision"`
 	SQLUp              string `gorm:"not null" json:"sql_up"`
 	SQLDown            string `json:"sql_down"`
-	Irreversible       bool `gorm:"not null" json:"irreversible"`
+	Irreversible       bool   `gorm:"not null" json:"irreversible"`
 	IrreversibleReason string `json:"irreversible_reason"`
 }
 
@@ -132,8 +132,9 @@ type SessionAlias struct {
 }
 
 type Group struct {
-	ID   int    `gorm:"primaryKey"`
-	Name string `gorm:"uniqueIndex;not null"`
+	ID       int    `gorm:"primaryKey"`
+	Name     string `gorm:"uniqueIndex;not null"`
+	LeaderID *int   `json:"leader_id"`
 }
 
 // GroupMemberSummary contains safe user details for a group's member list.
@@ -160,4 +161,36 @@ type GroupDBAccess struct {
 	GroupID     int    `gorm:"primaryKey;autoIncrement:false"`
 	TargetDBID  int    `gorm:"primaryKey;autoIncrement:false"`
 	AccessLevel string `gorm:"not null"`
+}
+
+type MigrationJob struct {
+	ID                  int    `gorm:"primaryKey" json:"job_id"`
+	ApprovalID          string `gorm:"uniqueIndex:migration_jobs_approval_id_unique,where:approval_id <> ''" json:"-"`
+	Revision            int
+	ExpectedExecutionID int
+	ExecutionID         int64      `json:"execution_id"`
+	SourceJobID         int        `json:"-"`
+	MigrationID         int        `json:"migration_id"`
+	TargetDBID          int        `gorm:"index" json:"target_db_id"`
+	Actor               string     `json:"-"`
+	Action              string     `json:"action"`
+	Mode                string     `json:"mode"`
+	BatchSize           int        `json:"batch_size"`
+	BatchTable          string     `json:"batch_table,omitempty"`
+	BatchAttribute      string     `json:"batch_attribute,omitempty"`
+	Status              string     `gorm:"index" json:"status"`
+	Attempts            int        `json:"attempts"`
+	PublishFailures     int        `json:"-"`
+	CommittedBatches    int64      `json:"committed_batches"`
+	CommittedRows       int64      `json:"committed_rows"`
+	TotalRows           int64      `json:"total_rows"`
+	Cursor              int64      `json:"cursor"`
+	ErrorMessage        string     `json:"error,omitempty"`
+	ResumedBy           string     `json:"-"`
+	PlannedVersion      int        `json:"-"`
+	PublishedAt         *time.Time `json:"-"`
+	NextAttemptAt       time.Time  `json:"next_attempt_at"`
+	TraceParent         string     `json:"-"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
