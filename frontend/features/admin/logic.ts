@@ -66,6 +66,28 @@ export async function submitAssignMember(
   };
 }
 
+export async function submitSetGroupLeader(
+  adminService: AdminService,
+  groupIdRaw: string,
+  userIdRaw: string
+): Promise<
+  { ok: true; message: string; groups: GroupDetail[] } | { ok: false; error: string }
+> {
+  const res = await adminService.setGroupLeader(
+    Number.parseInt(groupIdRaw, 10),
+    Number.parseInt(userIdRaw, 10)
+  );
+  if (!res.ok) {
+    return { ok: false, error: res.error };
+  }
+  const groups = await adminService.listGroups();
+  return {
+    ok: true,
+    message: res.message ?? "Leader group berhasil ditetapkan.",
+    groups,
+  };
+}
+
 export async function submitSetGroupAccess(
   adminService: AdminService,
   groupIdRaw: string,

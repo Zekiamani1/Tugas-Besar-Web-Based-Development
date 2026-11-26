@@ -5,6 +5,7 @@ import {
   submitRegisterDatabase,
   submitRegisterUser,
   submitSetGroupAccess,
+  submitSetGroupLeader,
 } from "@/features/admin/logic";
 import {
   buildExplorerUrl,
@@ -13,9 +14,16 @@ import {
   loadTableSelection,
 } from "@/features/databases/logic";
 import {
-  applyCompletedMigration,
+  buildDraftRequestBody,
+  buildSubmissionPayload,
+  isTerminalJobStatus,
+  normalizeJob,
+  normalizePosition,
+  normalizeReview,
+  parseJobIdFromLocation,
   resolveSelectedMigration,
   sortMigrationHistory,
+  validateDraftInput,
 } from "@/features/migrations/logic";
 import type {
   AdminService,
@@ -49,6 +57,7 @@ function createFakeAdminService(
     registerUser: vi.fn(),
     createGroup: vi.fn(),
     assignUserToGroup: vi.fn(),
+    setGroupLeader: vi.fn(),
     setGroupDbAccess: vi.fn(),
     registerDatabase: vi.fn(),
     ...overrides,
@@ -177,11 +186,18 @@ describe("Pure TypeScript feature logic", () => {
       },
     ];
 
-    it("sorts history ascending by executedAt and id", () => {
+    it("sorts history ascending by executedAt, executionId, and id", () => {
+      const sameTime: MigrationRecord[] = [
+        { ...history[1], executionId: 12 },
+        { ...history[1], executionId: 10 },
+      ];
       expect(sortMigrationHistory(history).map((m) => m.id)).toEqual([1, 2]);
+      expect(
+        sortMigrationHistory(sameTime).map((m) => m.executionId)
+      ).toEqual([10, 12]);
     });
 
-    it("resolves selected migration with role-appropriate fallbacks", () => {
+    it("resolves selected migration with role-appropriate fallbacks and picks latest execution from history", () => {
       expect(
         resolveSelectedMigration({
           canEdit: true,
@@ -208,21 +224,218 @@ describe("Pure TypeScript feature logic", () => {
           selectedId: null,
         })?.id
       ).toBe(2);
+
+      const multiExecHistory: MigrationRecord[] = [
+        { ...history[1], executionId: 1, action: "APPLY", status: "APPLIED" },
+        {
+          ...history[1],
+          executionId: 2,
+          action: "ROLLBACK",
+          status: "APPLIED",
+        },
+      ];
+      expect(
+        resolveSelectedMigration({
+          canEdit: true,
+          drafts: [],
+          history: multiExecHistory,
+          selectedId: 1,
+        })?.executionId
+      ).toBe(2);
     });
 
-    it("moves both APPLIED and FAILED executions from drafts into sorted history", () => {
-      const sorted = sortMigrationHistory(history);
-      const failed: MigrationRecord = {
-        ...drafts[0],
-        status: "FAILED",
-        executedBy: "budi",
-        executedAt: "2026-11-25 11:00:00 UTC",
-      };
+    it("validates structured drafts and builds clean request payloads", () => {
+      expect(
+        validateDraftInput({
+          sqlUp: " ",
+          sqlDown: "DROP TABLE x;",
+          irreversible: false,
+          irreversibleReason: "",
+        })
+      ).toBe("SQL Up wajib diisi.");
 
-      const next = applyCompletedMigration({ drafts, history: sorted }, failed);
-      expect(next.drafts).toEqual([]);
-      expect(next.history.map((m) => m.id)).toEqual([1, 2, 3]);
-      expect(next.history[2].status).toBe("FAILED");
+      expect(
+        validateDraftInput({
+          sqlUp: "CREATE TABLE x(id INT);",
+          sqlDown: "",
+          irreversible: false,
+          irreversibleReason: "",
+        })
+      ).toBe("SQL Down wajib diisi jika migrasi dapat di-rollback.");
+
+      expect(
+        validateDraftInput({
+          sqlUp: "DROP TABLE legacy;",
+          sqlDown: "",
+          irreversible: true,
+          irreversibleReason: " ",
+        })
+      ).toBe("Alasan irreversible wajib diisi.");
+
+      expect(
+        buildDraftRequestBody({
+          sqlUp: " CREATE TABLE x(id INT); ",
+          sqlDown: " DROP TABLE x; ",
+          irreversible: false,
+          irreversibleReason: "should be stripped",
+        })
+      ).toEqual({
+        sql_up: "CREATE TABLE x(id INT);",
+        sql_down: "DROP TABLE x;",
+        irreversible: false,
+        irreversible_reason: "",
+      });
+
+      expect(
+        buildDraftRequestBody({
+          sqlUp: " DROP TABLE legacy; ",
+          sqlDown: "ignored down",
+          irreversible: true,
+          irreversibleReason: " Destructive drop ",
+        })
+      ).toEqual({
+        sql_up: "DROP TABLE legacy;",
+        sql_down: "",
+        irreversible: true,
+        irreversible_reason: "Destructive drop",
+      });
+    });
+
+    it("builds strict submission payloads for APPLY/ROLLBACK/FORWARD in STANDARD and BATCH modes", () => {
+      expect(
+        buildSubmissionPayload({
+          action: "APPLY",
+          mode: "STANDARD",
+          revision: 2,
+          batchSize: 500,
+        })
+      ).toEqual({
+        ok: true,
+        body: { action: "APPLY", mode: "STANDARD", revision: 2 },
+      });
+
+      expect(
+        buildSubmissionPayload({
+          action: "APPLY",
+          mode: "STANDARD",
+          revision: 0,
+        })
+      ).toEqual({
+        ok: false,
+        error: "Revision draft wajib berupa angka positif.",
+      });
+
+      expect(
+        buildSubmissionPayload({
+          action: "ROLLBACK",
+          mode: "BATCH",
+          expectedExecutionId: 9,
+          batchSize: 500,
+          batchTable: " public.orders ",
+          batchAttribute: " id ",
+        })
+      ).toEqual({
+        ok: true,
+        body: {
+          action: "ROLLBACK",
+          mode: "BATCH",
+          expected_execution_id: 9,
+          batch_size: 500,
+          batch_table: "public.orders",
+          batch_attribute: "id",
+        },
+      });
+
+      expect(
+        buildSubmissionPayload({
+          action: "FORWARD",
+          mode: "BATCH",
+          expectedExecutionId: 9,
+          batchSize: 20000,
+          batchTable: "public.orders",
+          batchAttribute: "id",
+        })
+      ).toEqual({
+        ok: false,
+        error: "Batch size harus berupa angka antara 1 sampai 10000.",
+      });
+    });
+
+    it("parses Location job IDs, detects terminal job statuses, and normalizes API DTOs", () => {
+      expect(
+        parseJobIdFromLocation("/databases/1/migrations/5?job_id=42")
+      ).toBe(42);
+      expect(parseJobIdFromLocation(null)).toBeNull();
+
+      expect(isTerminalJobStatus("QUEUED")).toBe(false);
+      expect(isTerminalJobStatus("RUNNING")).toBe(false);
+      expect(isTerminalJobStatus("SUCCEEDED")).toBe(true);
+      expect(isTerminalJobStatus("FAILED")).toBe(true);
+      expect(isTerminalJobStatus("PARTIALLY_REVERTED")).toBe(true);
+
+      expect(
+        normalizePosition({
+          active_head: { execution_id: 10, migration_id: 3, revision: 2 },
+          next_forward: null,
+        })
+      ).toEqual({
+        activeHead: { executionId: 10, migrationId: 3, revision: 2 },
+        nextForward: null,
+      });
+
+      expect(
+        normalizeReview({
+          review_id: 7,
+          target_db_id: 1,
+          migration_id: 3,
+          status: "PENDING_REVIEW",
+          actor_id: 2,
+          action: "APPLY",
+          mode: "STANDARD",
+          batch_size: 0,
+          revision: 1,
+          sql_snapshot: "SELECT 1;",
+          groups: [
+            {
+              group_id: 1,
+              status: "PENDING",
+              decided_by: null,
+              decided_at: null,
+            },
+          ],
+        })
+      ).toMatchObject({
+        reviewId: 7,
+        status: "PENDING_REVIEW",
+        groups: [{ groupId: 1, status: "PENDING", decidedBy: null }],
+      });
+
+      expect(
+        normalizeJob({
+          job_id: 42,
+          execution_id: 15,
+          migration_id: 3,
+          target_db_id: 1,
+          action: "APPLY",
+          mode: "BATCH",
+          batch_size: 100,
+          batch_table: "public.orders",
+          batch_attribute: "id",
+          status: "SUCCEEDED",
+          attempts: 1,
+          committed_batches: 3,
+          committed_rows: 250,
+          total_rows: 250,
+          cursor: 250,
+          created_at: "2026-11-26T00:00:00Z",
+          updated_at: "2026-11-26T00:01:00Z",
+        })
+      ).toMatchObject({
+        jobId: 42,
+        status: "SUCCEEDED",
+        committedBatches: 3,
+        committedRows: 250,
+      });
     });
   });
 
@@ -305,6 +518,10 @@ describe("Pure TypeScript feature logic", () => {
           ok: true,
           message: "Akses disimpan.",
         })),
+        setGroupLeader: vi.fn<AdminService["setGroupLeader"]>(async () => ({
+          ok: true,
+          message: "Leader disimpan.",
+        })),
         registerDatabase: vi.fn<AdminService["registerDatabase"]>(async () => ({
           ok: true,
           message: "DB ditambahkan dengan id 4",
@@ -342,6 +559,14 @@ describe("Pure TypeScript feature logic", () => {
       expect(accessRes).toEqual({
         ok: true,
         message: "Akses disimpan.",
+        groups: updatedGroups,
+      });
+
+      const leaderRes = await submitSetGroupLeader(adminService, "1", "2");
+      expect(adminService.setGroupLeader).toHaveBeenCalledWith(1, 2);
+      expect(leaderRes).toEqual({
+        ok: true,
+        message: "Leader disimpan.",
         groups: updatedGroups,
       });
 

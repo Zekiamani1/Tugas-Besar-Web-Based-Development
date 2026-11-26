@@ -15,7 +15,10 @@ import { ApiError } from "@/lib/api/http";
 import { loadAdminData } from "@/lib/api/server/admin";
 import { loadDashboardData } from "@/lib/api/server/dashboard";
 import { loadDatabaseExplorerData } from "@/lib/api/server/databases";
-import { loadMigrationsData } from "@/lib/api/server/migrations";
+import {
+  loadMigrationReviewData,
+  loadMigrationsData,
+} from "@/lib/api/server/migrations";
 import { parseSessionClaims, SESSION_COOKIE } from "@/lib/session";
 import { proxy } from "@/proxy";
 import { createMswBackend, TEST_BACKEND_URL } from "./msw-backend";
@@ -93,6 +96,15 @@ describe("Frontend API services & SSR loaders (direct Go CORS backend via MSW)",
     const assigned = await adminService.assignUserToGroup(andi!.id, qaGroup!.id);
     expect(assigned.ok).toBe(true);
 
+    const invalidLeader = await adminService.setGroupLeader(qaGroup!.id, 1);
+    expect(invalidLeader.ok).toBe(false);
+
+    const assignedLeader = await adminService.setGroupLeader(
+      qaGroup!.id,
+      andi!.id
+    );
+    expect(assignedLeader.ok).toBe(true);
+
     const invalidDb = await adminService.registerDatabase({
       name: "Broken Postgres",
       dbType: "postgres",
@@ -150,35 +162,165 @@ describe("Frontend API services & SSR loaders (direct Go CORS backend via MSW)",
     expect(page2.rows).toHaveLength(2);
     expect(page2.rows[0].nama).toBe("Standing Desk Mat");
 
-    const created = await migrationService.createDraft(
-      1,
-      "SELECT * FROM produk;"
-    );
+    const created = await migrationService.createDraft(1, {
+      sqlUp: "CREATE TABLE demo (id INT);",
+      sqlDown: "DROP TABLE demo;",
+      irreversible: false,
+      irreversibleReason: "",
+    });
     expect(created.ok).toBe(true);
     expect(created.data?.status).toBe("DRAFT");
     expect(created.data?.executedAt).toBe("");
 
     const draftId = created.data!.id;
-    const updated = await migrationService.updateDraft(
-      1,
-      draftId,
-      "SELECT id, nama FROM produk;"
-    );
+    const def1 = await migrationService.getDefinition(1, draftId);
+    expect(def1.ok).toBe(true);
+    expect(def1.data?.revision).toBe(1);
+
+    const updated = await migrationService.updateDraft(1, draftId, {
+      sqlUp: "CREATE TABLE demo (id INT PRIMARY KEY);",
+      sqlDown: "DROP TABLE demo;",
+      irreversible: false,
+      irreversibleReason: "",
+    });
     expect(updated.ok).toBe(true);
+
+    const def2 = await migrationService.getDefinition(1, draftId);
+    expect(def2.ok).toBe(true);
+    expect(def2.data?.revision).toBe(2);
 
     const explained = await migrationService.explainDraft(1, draftId);
     expect(explained.ok).toBe(true);
     expect(explained.data).toContain("Seq Scan on public.produk");
 
-    const executed = await migrationService.executeDraft(1, draftId);
-    expect(executed.ok).toBe(true);
-    expect(executed.data?.status).toBe("APPLIED");
+    const submitted = await migrationService.submitMigration(1, draftId, {
+      action: "APPLY",
+      mode: "STANDARD",
+      revision: 2,
+    });
+    expect(submitted.ok).toBe(true);
+    const applyReviewId = submitted.data!.reviewId;
 
-    const failDraft = await migrationService.createDraft(1, "FAIL BAD SQL;");
+    await authService.login("budi_developer", "budi123");
+    const budiPending = await migrationService.listPendingReviews(1);
+    expect(budiPending.ok).toBe(true);
+    expect(budiPending.data?.some((r) => r.reviewId === applyReviewId)).toBe(
+      true
+    );
+    const budiDecision = await migrationService.decideReview(
+      1,
+      draftId,
+      applyReviewId,
+      1,
+      "APPROVED"
+    );
+    expect(budiDecision.ok).toBe(true);
+    expect(budiDecision.data?.jobId).toBeNull();
+
+    await authService.login("siti_analyst", "siti123");
+    const sitiDecision = await migrationService.decideReview(
+      1,
+      draftId,
+      applyReviewId,
+      2,
+      "APPROVED"
+    );
+    expect(sitiDecision.ok).toBe(true);
+    const applyJobId = sitiDecision.data!.jobId!;
+    expect(applyJobId).toBeGreaterThan(0);
+
+    const applyJob = await migrationService.getJob(1, draftId, applyJobId);
+    expect(applyJob.ok).toBe(true);
+    expect(applyJob.data?.status).toBe("SUCCEEDED");
+    expect(applyJob.data?.executionId).toBeGreaterThan(1);
+
+    const posAfterApply = await migrationService.getPosition(1);
+    expect(posAfterApply.ok).toBe(true);
+    expect(posAfterApply.data?.activeHead).toMatchObject({
+      migrationId: draftId,
+      executionId: applyJob.data!.executionId,
+    });
+
+    await authService.login("budi_developer", "budi123");
+    const rollbackSubmit = await migrationService.submitMigration(1, draftId, {
+      action: "ROLLBACK",
+      mode: "STANDARD",
+      expectedExecutionId: applyJob.data!.executionId,
+    });
+    expect(rollbackSubmit.ok).toBe(true);
+    const rollbackReviewId = rollbackSubmit.data!.reviewId;
+    expect(
+      (
+        await migrationService.decideReview(
+          1,
+          draftId,
+          rollbackReviewId,
+          1,
+          "APPROVED"
+        )
+      ).ok
+    ).toBe(true);
+
+    await authService.login("siti_analyst", "siti123");
+    const rollbackSiti = await migrationService.decideReview(
+      1,
+      draftId,
+      rollbackReviewId,
+      2,
+      "APPROVED"
+    );
+    expect(rollbackSiti.ok).toBe(true);
+
+    const fullState = await migrationService.listState(1, {
+      hideRollback: false,
+    });
+    const hiddenState = await migrationService.listState(1, {
+      hideRollback: true,
+    });
+    expect(fullState.data?.history).toHaveLength(3);
+    expect(hiddenState.data?.history).toHaveLength(1);
+
+    const posAfterRollback = await migrationService.getPosition(1);
+    expect(posAfterRollback.data?.activeHead?.migrationId).toBe(1);
+    expect(posAfterRollback.data?.nextForward?.migrationId).toBe(draftId);
+
+    await authService.login("admin", "admin123");
+    const failDraft = await migrationService.createDraft(1, {
+      sqlUp: "FAIL BAD SQL;",
+      sqlDown: "",
+      irreversible: true,
+      irreversibleReason: "Test failure flow",
+    });
     expect(failDraft.ok).toBe(true);
-    const failExec = await migrationService.executeDraft(1, failDraft.data!.id);
-    expect(failExec.ok).toBe(false);
-    expect(failExec.data?.status).toBe("FAILED");
+    const failSubmit = await migrationService.submitMigration(
+      1,
+      failDraft.data!.id,
+      { action: "APPLY", mode: "STANDARD", revision: 1 }
+    );
+    expect(failSubmit.ok).toBe(true);
+    await authService.login("budi_developer", "budi123");
+    await migrationService.decideReview(
+      1,
+      failDraft.data!.id,
+      failSubmit.data!.reviewId,
+      1,
+      "APPROVED"
+    );
+    await authService.login("siti_analyst", "siti123");
+    const failFinal = await migrationService.decideReview(
+      1,
+      failDraft.data!.id,
+      failSubmit.data!.reviewId,
+      2,
+      "APPROVED"
+    );
+    const failJob = await migrationService.getJob(
+      1,
+      failDraft.data!.id,
+      failFinal.data!.jobId!
+    );
+    expect(failJob.ok).toBe(true);
+    expect(failJob.data?.status).toBe("FAILED");
 
     await authService.logout();
     expect(readDocumentCookie(SESSION_COOKIE)).toBeUndefined();
@@ -272,8 +414,43 @@ describe("Frontend API services & SSR loaders (direct Go CORS backend via MSW)",
     expect(explorer.activeTable).toBe("produk");
     expect(explorer.tableData.totalPages).toBe(2);
 
-    const migs = await loadMigrationsData(1, analystCookie, TEST_BACKEND_URL);
+    const migs = await loadMigrationsData(1, {
+      cookieHeader: analystCookie,
+      baseUrl: TEST_BACKEND_URL,
+    });
     expect(migs.canEdit).toBe(false);
     expect(migs.history).toHaveLength(1);
+    expect(migs.position.activeHead?.migrationId).toBe(1);
+
+    await expect(
+      loadMigrationReviewData(1, 1, 999, {
+        cookieHeader: analystCookie,
+        baseUrl: TEST_BACKEND_URL,
+      })
+    ).rejects.toMatchObject({ status: 404 });
+
+    await authService.login("budi_developer", "budi123");
+    const reviewDraft = await migrationService.createDraft(1, {
+      sqlUp: "CREATE TABLE review_ssr (id INT);",
+      sqlDown: "DROP TABLE review_ssr;",
+      irreversible: false,
+      irreversibleReason: "",
+    });
+    const submitted = await migrationService.submitMigration(
+      1,
+      reviewDraft.data!.id,
+      { action: "APPLY", mode: "STANDARD", revision: 1 }
+    );
+    const loadedReview = await loadMigrationReviewData(
+      1,
+      reviewDraft.data!.id,
+      submitted.data!.reviewId,
+      {
+        cookieHeader: backend.getActiveSessionCookie(),
+        baseUrl: TEST_BACKEND_URL,
+      }
+    );
+    expect(loadedReview.review.reviewId).toBe(submitted.data!.reviewId);
+    expect(loadedReview.review.status).toBe("PENDING_REVIEW");
   });
 });

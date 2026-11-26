@@ -100,9 +100,34 @@ form > button, form > .form-grid + button { margin-top: 14px; }
 .item-list li:last-child { padding-bottom: 0; }
 
 .status { display: inline-block; padding: 1px 5px; color: #444; background: #eee; border: 1px solid #bbb; font-size: 12px; }
-.status[data-status="APPLIED"] { color: #245324; background: #edf5ed; border-color: #9b9; }
-.status[data-status="FAILED"] { color: #8b0000; background: #faeeee; border-color: #c88; }
-.status[data-status="DRAFT"] { color: #765500; background: #fff9e8; border-color: #ccba77; }
+.status[data-status="APPLIED"],
+.status[data-status="APPROVED"],
+.status[data-status="SUCCEEDED"] { color: #245324; background: #edf5ed; border-color: #9b9; }
+.status[data-status="FAILED"],
+.status[data-status="REJECTED"] { color: #8b0000; background: #faeeee; border-color: #c88; }
+.status[data-status="DRAFT"],
+.status[data-status="PENDING_REVIEW"],
+.status[data-status="PENDING"],
+.status[data-status="QUEUED"] { color: #765500; background: #fff9e8; border-color: #ccba77; }
+.status[data-status="RUNNING"] { color: #0645ad; background: #eef4fc; border-color: #8ab; }
+.status[data-status="UNCERTAIN"],
+.status[data-status="PARTIAL"],
+.status[data-status="PARTIALLY_REVERTED"],
+.status[data-status="COMPENSATED"] { color: #7a3e00; background: #fff3e6; border-color: #c98; }
+
+.checkbox-label {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin: 10px 0 4px;
+	font-weight: normal;
+	cursor: pointer;
+}
+.checkbox-label input[type="checkbox"] {
+	width: auto;
+	display: inline-block;
+	margin: 0;
+}
 .sql-preview {
 	margin: 10px 0 0;
 	padding: 10px;

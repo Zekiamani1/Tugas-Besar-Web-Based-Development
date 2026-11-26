@@ -3,7 +3,15 @@ import type {
   ActionResult,
   Group,
   GroupDetail,
+  MigrationDefinition,
+  MigrationDraftInput,
+  MigrationJob,
+  MigrationListState,
+  MigrationPosition,
   MigrationRecord,
+  MigrationReview,
+  MigrationReviewDecision,
+  MigrationSubmissionInput,
   RegisterTargetDBInput,
   TableDataResult,
   TableMetadata,
@@ -33,20 +41,48 @@ export interface DatabaseService {
 }
 
 export interface MigrationService {
+  listState(
+    dbId: number,
+    options?: { hideRollback?: boolean }
+  ): Promise<ActionResult<MigrationListState>>;
+  getPosition(dbId: number): Promise<ActionResult<MigrationPosition>>;
+  getDefinition(
+    dbId: number,
+    migrationId: number
+  ): Promise<ActionResult<MigrationDefinition>>;
   createDraft(
     dbId: number,
-    sqlQuery: string
+    input: MigrationDraftInput
   ): Promise<ActionResult<MigrationRecord>>;
   updateDraft(
     dbId: number,
     migrationId: number,
-    sqlQuery: string
+    input: MigrationDraftInput
   ): Promise<ActionResult<MigrationRecord>>;
   explainDraft(dbId: number, migrationId: number): Promise<ActionResult<string>>;
-  executeDraft(
+  submitMigration(
     dbId: number,
-    migrationId: number
-  ): Promise<ActionResult<MigrationRecord>>;
+    migrationId: number,
+    input: MigrationSubmissionInput
+  ): Promise<ActionResult<{ reviewId: number }>>;
+  listPendingReviews(dbId: number): Promise<ActionResult<MigrationReview[]>>;
+  getReview(
+    dbId: number,
+    migrationId: number,
+    reviewId: number
+  ): Promise<ActionResult<MigrationReview>>;
+  decideReview(
+    dbId: number,
+    migrationId: number,
+    reviewId: number,
+    groupId: number,
+    decision: MigrationReviewDecision
+  ): Promise<ActionResult<{ jobId: number | null; location: string | null }>>;
+  getJob(
+    dbId: number,
+    migrationId: number,
+    jobId: number
+  ): Promise<ActionResult<MigrationJob>>;
 }
 
 export interface AdminService {
@@ -59,6 +95,7 @@ export interface AdminService {
   ): Promise<ActionResult<UserSummary>>;
   createGroup(groupName: string): Promise<ActionResult<Group>>;
   assignUserToGroup(userId: number, groupId: number): Promise<ActionResult>;
+  setGroupLeader(groupId: number, userId: number): Promise<ActionResult>;
   setGroupDbAccess(
     groupId: number,
     targetDbId: number,

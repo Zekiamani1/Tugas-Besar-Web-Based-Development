@@ -10,12 +10,14 @@ import { LoginForm } from "@/features/auth/LoginForm";
 import { DatabaseList } from "@/features/dashboard/DatabaseList";
 import { DatabaseExplorer } from "@/features/databases/DatabaseExplorer";
 import { MigrationManager } from "@/features/migrations/MigrationManager";
+import { MigrationReviewPanel } from "@/features/migrations/MigrationReviewPanel";
 import { Providers } from "@/app/providers";
 import type { AppServices, DatabaseService } from "@/lib/api/contract";
 import type {
   DatabaseExplorerInitialData,
   GroupDetail,
   MigrationRecord,
+  MigrationReview,
   TargetDBInfo,
   UserSummary,
 } from "@/lib/types";
@@ -90,6 +92,9 @@ const SAMPLE_EXPLORER_DATA: DatabaseExplorerInitialData = {
 const SAMPLE_HISTORY: MigrationRecord[] = [
   {
     id: 1,
+    executionId: 1,
+    action: "APPLY",
+    revision: 1,
     targetDbId: 1,
     version: 1,
     sqlQuery: "CREATE TABLE public.produk (id INT PRIMARY KEY);",
@@ -98,6 +103,22 @@ const SAMPLE_HISTORY: MigrationRecord[] = [
     executedAt: "2026-11-24 10:00:00 UTC",
   },
 ];
+
+const SAMPLE_REVIEW: MigrationReview = {
+  reviewId: 7,
+  targetDbId: 1,
+  migrationId: 1,
+  status: "PENDING_REVIEW",
+  actorId: 2,
+  action: "APPLY",
+  mode: "STANDARD",
+  batchSize: 0,
+  revision: 1,
+  sqlSnapshot: "CREATE TABLE public.produk (id INT PRIMARY KEY);",
+  groups: [
+    { groupId: 1, status: "PENDING", decidedBy: null, decidedAt: null },
+  ],
+};
 
 let activeRoot: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -201,11 +222,32 @@ describe("SSR + React hydration fidelity", () => {
         canEdit
         initialDrafts={[]}
         initialHistory={SAMPLE_HISTORY}
+        initialPosition={{
+          activeHead: { executionId: 1, migrationId: 1, revision: 1 },
+          nextForward: null,
+        }}
+        initialPendingReviews={[SAMPLE_REVIEW]}
       />
     );
 
     expect(ssrHtml).toContain("Create Draft");
     expect(ssrHtml).toContain("Migration #1");
+    expect(ssrHtml).toContain("Posisi Migrasi");
+    expect(hydrationErrors).toEqual([]);
+  });
+
+  it("hydrates MigrationReviewPanel without mismatch warnings", () => {
+    const { ssrHtml, hydrationErrors } = mountSsrAndHydrate(
+      <MigrationReviewPanel
+        dbId={1}
+        initialReview={SAMPLE_REVIEW}
+        initialJob={null}
+        currentUserId={2}
+      />
+    );
+
+    expect(ssrHtml).toContain("Review #7");
+    expect(ssrHtml).toContain("PENDING_REVIEW");
     expect(hydrationErrors).toEqual([]);
   });
 
