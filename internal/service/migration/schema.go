@@ -13,7 +13,7 @@ func (s *Service) Initialize(ctx context.Context) error {
 		if err := meta.Exec("SELECT pg_advisory_xact_lock(3110, 0)").Error; err != nil {
 			return err
 		}
-		if err := meta.AutoMigrate(&models.Migration{}, &models.MigrationExecution{}, &models.MigrationJob{}); err != nil {
+		if err := meta.AutoMigrate(&models.Migration{}, &models.MigrationExecution{}, &models.MigrationJob{}, &migrationReview{}, &migrationReviewGroup{}); err != nil {
 			return err
 		}
 		if err := meta.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS migration_database_inflight_unique

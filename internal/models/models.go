@@ -132,8 +132,9 @@ type SessionAlias struct {
 }
 
 type Group struct {
-	ID   int    `gorm:"primaryKey"`
-	Name string `gorm:"uniqueIndex;not null"`
+	ID       int    `gorm:"primaryKey"`
+	Name     string `gorm:"uniqueIndex;not null"`
+	LeaderID *int   `json:"leader_id"`
 }
 
 // GroupMemberSummary contains safe user details for a group's member list.

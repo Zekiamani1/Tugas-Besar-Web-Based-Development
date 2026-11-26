@@ -363,12 +363,36 @@ func TestCreateGroupStoresTrimmedName(t *testing.T) {
 	service, mock := newMockService(t)
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "groups"`)).
-		WithArgs("team").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
+		WithArgs("team", nil).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(2))
 	mock.ExpectCommit()
 	if err := service.CreateGroup(context.Background(), " team "); err != nil {
 		t.Fatalf("CreateGroup returned error: %v", err)
 	}
 	assertExpectations(t, mock)
+}
+
+func TestSetGroupLeaderRequiresMembership(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		rows      int64
+		wantError bool
+	}{
+		{name: "member", rows: 1},
+		{name: "not a member", rows: 0, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service, mock := newMockService(t)
+			mock.ExpectBegin()
+			mock.ExpectExec(regexp.QuoteMeta("UPDATE \"groups\" SET \"leader_id\"=$1 WHERE id = $2 AND EXISTS (SELECT 1 FROM user_groups WHERE group_id = $3 AND user_id = $4)")).
+				WithArgs(7, 2, 2, 7).WillReturnResult(sqlmock.NewResult(0, tc.rows))
+			mock.ExpectCommit()
+			err := service.SetGroupLeader(context.Background(), 2, 7)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("SetGroupLeader error: %v", err)
+			}
+			assertExpectations(t, mock)
+		})
+	}
 }
 
 func TestAssignUserToGroupRejectsInvalidIDs(t *testing.T) {
@@ -653,7 +677,7 @@ func TestListUsersReturnsDatabaseError(t *testing.T) {
 
 func TestListGroupsReturnsDetailsInIDOrder(t *testing.T) {
 	service, mock := newMockService(t)
-	mock.ExpectQuery(`SELECT "id","name" FROM "groups" ORDER BY id ASC`).
+	mock.ExpectQuery(`SELECT "id","name","leader_id" FROM "groups" ORDER BY id ASC`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}).
 			AddRow(1, "analysts").
 			AddRow(3, "developers"))
@@ -670,7 +694,7 @@ func TestListGroupsReturnsDetailsInIDOrder(t *testing.T) {
 
 func TestListGroupsReturnsEmptyList(t *testing.T) {
 	service, mock := newMockService(t)
-	mock.ExpectQuery(`SELECT "id","name" FROM "groups" ORDER BY id ASC`).
+	mock.ExpectQuery(`SELECT "id","name","leader_id" FROM "groups" ORDER BY id ASC`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name"}))
 
 	groups, err := service.ListGroups(context.Background())
@@ -685,7 +709,7 @@ func TestListGroupsReturnsEmptyList(t *testing.T) {
 
 func TestListGroupsReturnsDatabaseError(t *testing.T) {
 	service, mock := newMockService(t)
-	mock.ExpectQuery(`SELECT "id","name" FROM "groups" ORDER BY id ASC`).
+	mock.ExpectQuery(`SELECT "id","name","leader_id" FROM "groups" ORDER BY id ASC`).
 		WillReturnError(errors.New("database unavailable"))
 
 	groups, err := service.ListGroups(context.Background())

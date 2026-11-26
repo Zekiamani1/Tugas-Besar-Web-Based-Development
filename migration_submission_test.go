@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,59 @@ import (
 	"wbd/internal/middleware"
 	"wbd/internal/service/interfaces"
 )
+
+type reviewAPIStub struct {
+	review interfaces.MigrationReview
+	actor  int
+}
+
+func (s *reviewAPIStub) SubmitMigration(context.Context, interfaces.MigrationSubmission) (string, error) {
+	return "4", nil
+}
+
+func (s *reviewAPIStub) GetMigrationReview(_ context.Context, dbID, migrationID, reviewID int) (interfaces.MigrationReview, error) {
+	if dbID != s.review.TargetDBID || migrationID != s.review.MigrationID || reviewID != s.review.ID {
+		return interfaces.MigrationReview{}, errors.New("not found")
+	}
+	return s.review, nil
+}
+
+func (s *reviewAPIStub) DecideMigrationReview(_ context.Context, reviewID, groupID, actorID int, decision string) error {
+	if reviewID != s.review.ID || groupID != 3 || decision != "APPROVED" {
+		return errors.New("invalid decision")
+	}
+	s.actor = actorID
+	return nil
+}
+
+func TestMigrationReviewAPI(t *testing.T) {
+	ac := &mockAccessControlService{
+		validateSessionFunc:  func(context.Context, string) (int, error) { return 7, nil },
+		evaluateDBAccessFunc: func(context.Context, int, int, string) error { return nil },
+	}
+	approval := &reviewAPIStub{review: interfaces.MigrationReview{ID: 4, TargetDBID: 1, MigrationID: 2, Status: "PENDING_REVIEW"}}
+	app := NewAppWithConfig(ac, nil, nil, CookieConfig{MigrationApproval: approval})
+	for _, tc := range []struct {
+		method, path, body string
+		status             int
+	}{
+		{http.MethodGet, "/databases/1/migrations/2/reviews/4", "", http.StatusOK},
+		{http.MethodPost, "/databases/1/migrations/2/reviews/4/decision", "{\"group_id\":3,\"decision\":\"APPROVED\"}", http.StatusNoContent},
+		{http.MethodGet, "/databases/1/migrations/9/reviews/4", "", http.StatusNotFound},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "session"})
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		if rec.Code != tc.status {
+			t.Fatalf("%s %s: got %d %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+	if approval.actor != 7 {
+		t.Fatalf("decision actor=%d", approval.actor)
+	}
+}
 
 type submitMigrationFunc func(context.Context, interfaces.MigrationSubmission) (string, error)
 
@@ -25,7 +79,7 @@ func TestMigrationSubmission(t *testing.T) {
 	calls := 0
 	approval := submitMigrationFunc(func(_ context.Context, input interfaces.MigrationSubmission) (string, error) {
 		calls++
-		want := interfaces.MigrationSubmission{TargetDBID: 1, MigrationID: 2, ActorID: 7, Action: "ROLLBACK", ExpectedExecutionID: 9}
+		want := interfaces.MigrationSubmission{TargetDBID: 1, MigrationID: 2, ActorID: 7, Action: "ROLLBACK", Mode: "STANDARD", ExpectedExecutionID: 9}
 		if input != want {
 			t.Fatalf("submission = %+v, want %+v", input, want)
 		}

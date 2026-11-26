@@ -78,6 +78,7 @@ func main() {
 	}
 	go runRabbit(ctx, rabbitURL, func(conn *amqp.Connection) error { return migSvc.RunPublisher(ctx, conn, "migration_jobs") })
 
+	cookieConfig.MigrationApproval = migSvc
 	app := NewAppWithConfig(acSvc, dbmSvc, migSvc, cookieConfig)
 
 	port := os.Getenv("PORT")
