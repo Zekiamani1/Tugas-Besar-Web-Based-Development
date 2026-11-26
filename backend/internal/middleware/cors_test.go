@@ -34,6 +34,9 @@ func TestCORS(t *testing.T) {
 		if got := rec.Header().Get("Vary"); got != "Origin" {
 			t.Errorf("Vary = %q, want Origin", got)
 		}
+		if got := rec.Header().Get("Access-Control-Expose-Headers"); got != "Location" {
+			t.Errorf("Expose-Headers = %q, want Location", got)
+		}
 	})
 
 	t.Run("handles OPTIONS preflight for allowed origin with 204", func(t *testing.T) {
@@ -83,6 +86,9 @@ func TestCORS(t *testing.T) {
 		if got := optRec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 			t.Errorf("unexpected Allow-Origin header: %q", got)
 		}
+		if got := optRec.Header().Get("Access-Control-Expose-Headers"); got != "" {
+			t.Errorf("unexpected Expose-Headers on disallowed OPTIONS: %q", got)
+		}
 
 		getReq := httptest.NewRequest(http.MethodGet, "/health", nil)
 		getReq.Header.Set("Origin", "http://evil.example")
@@ -94,6 +100,9 @@ func TestCORS(t *testing.T) {
 		}
 		if got := getRec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 			t.Errorf("unexpected Allow-Origin header for disallowed origin: %q", got)
+		}
+		if got := getRec.Header().Get("Access-Control-Expose-Headers"); got != "" {
+			t.Errorf("unexpected Expose-Headers for disallowed origin: %q", got)
 		}
 	})
 
