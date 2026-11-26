@@ -20,6 +20,7 @@ import {
   submitRegisterDatabase,
   submitRegisterUser,
   submitSetGroupAccess,
+  submitSetGroupLeader,
 } from "./logic";
 
 export type { AdminTab };
@@ -28,6 +29,7 @@ type AdminFormKey =
   | "users"
   | "groups"
   | "members"
+  | "leader"
   | "permissions"
   | "databases";
 
@@ -54,6 +56,9 @@ const GROUP_COLUMNS: ReadonlyArray<DataTableColumn<GroupDetail>> = [
             <li key={member.id}>
               {member.username}{" "}
               <span className="muted">(User #{member.id})</span>
+              {group.leaderId != null && member.id === group.leaderId
+                ? " — Leader"
+                : null}
             </li>
           ))
         ) : (
@@ -124,6 +129,8 @@ export function AdminPanel({
   const [newGroupName, setNewGroupName] = useState("");
   const [memberUserId, setMemberUserId] = useState("");
   const [memberGroupId, setMemberGroupId] = useState("");
+  const [leaderGroupId, setLeaderGroupId] = useState("");
+  const [leaderUserId, setLeaderUserId] = useState("");
   const [accessGroupId, setAccessGroupId] = useState("");
   const [accessDbId, setAccessDbId] = useState("");
   const [accessLevel, setAccessLevel] = useState<AccessLevel>("VIEW_ONLY");
@@ -199,6 +206,25 @@ export function AdminPanel({
     setGroups(res.groups);
   }
 
+  async function handleSetGroupLeader() {
+    if (!adminService) return;
+    const res = await submitSetGroupLeader(
+      adminService,
+      leaderGroupId,
+      leaderUserId
+    );
+    if (!res.ok) {
+      setSuccessMessage(null);
+      setErrorState({ form: "leader", message: res.error });
+      return;
+    }
+    setErrorState(null);
+    setSuccessMessage(res.message);
+    setLeaderGroupId("");
+    setLeaderUserId("");
+    setGroups(res.groups);
+  }
+
   async function handleSetGroupAccess() {
     if (!adminService) return;
     const res = await submitSetGroupAccess(
@@ -252,6 +278,8 @@ export function AdminPanel({
   ];
 
   const isSqlite = dbType === "sqlite";
+  const selectedLeaderGroup =
+    groups.find((group) => String(group.id) === leaderGroupId) ?? null;
 
   return (
     <>
@@ -381,6 +409,84 @@ export function AdminPanel({
                   message={getFormError("members")}
                 />
                 <button type="submit">Assign</button>
+              </form>
+            </Card>
+
+            <Card title="Set Group Leader">
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void handleSetGroupLeader();
+                }}
+                noValidate
+              >
+                <label htmlFor="leader-group">Group</label>
+                <select
+                  id="leader-group"
+                  name="leader_group_id"
+                  value={leaderGroupId}
+                  onChange={(event) => {
+                    const nextGroupId = event.target.value;
+                    setLeaderGroupId(nextGroupId);
+                    const nextGroup = groups.find(
+                      (group) => String(group.id) === nextGroupId
+                    );
+                    if (
+                      !nextGroup?.members.some(
+                        (member) => String(member.id) === leaderUserId
+                      )
+                    ) {
+                      setLeaderUserId("");
+                    }
+                  }}
+                  required
+                >
+                  <option value="" disabled>
+                    Pilih group
+                  </option>
+                  {groups.length > 0 ? (
+                    groups.map((group) => (
+                      <option key={group.id} value={String(group.id)}>
+                        {group.name} (Group #{group.id})
+                      </option>
+                    ))
+                  ) : (
+                    <option value="" disabled>
+                      Tidak ada group
+                    </option>
+                  )}
+                </select>
+                <label htmlFor="leader-user">Leader User</label>
+                <select
+                  id="leader-user"
+                  name="leader_user_id"
+                  value={leaderUserId}
+                  onChange={(event) => setLeaderUserId(event.target.value)}
+                  required
+                >
+                  <option value="" disabled>
+                    {selectedLeaderGroup
+                      ? selectedLeaderGroup.members.length > 0
+                        ? "Pilih user leader"
+                        : "Group ini belum memiliki anggota"
+                      : "Pilih group terlebih dahulu"}
+                  </option>
+                  {selectedLeaderGroup
+                    ? selectedLeaderGroup.members.map((member) => (
+                        <option key={member.id} value={String(member.id)}>
+                          {member.username} (User #{member.id})
+                        </option>
+                      ))
+                    : null}
+                </select>
+                <p className="muted">
+                  Leader harus merupakan anggota grup tersebut.
+                </p>
+                <AlertMessage
+                  variant="error"
+                  message={getFormError("leader")}
+                />
+                <button type="submit">Set Leader</button>
               </form>
             </Card>
 

@@ -48,6 +48,7 @@ function createFakeAdminService(
     registerUser: vi.fn(),
     createGroup: vi.fn(),
     assignUserToGroup: vi.fn(),
+    setGroupLeader: vi.fn(),
     setGroupDbAccess: vi.fn(),
     registerDatabase: vi.fn(),
     ...overrides,
@@ -88,9 +89,17 @@ describe("AdminPanel", () => {
         data: newDb,
       });
 
+    const setGroupLeader = vi
+      .fn<AdminService["setGroupLeader"]>()
+      .mockResolvedValueOnce({
+        ok: true,
+        message: "Leader group berhasil ditetapkan.",
+      });
+
     const adminService = createFakeAdminService({
       registerUser,
       listUsers: vi.fn(async () => [...INITIAL_USERS, newUser]),
+      setGroupLeader,
       registerDatabase,
       listDatabases: vi.fn(async () => [...INITIAL_DATABASES, newDb]),
     });
@@ -123,6 +132,20 @@ describe("AdminPanel", () => {
     expect(registerUser).toHaveBeenLastCalledWith("andi_qa", "andi123");
     expect(await screen.findByRole("status")).toHaveTextContent(
       "berhasil menambahkan andi_qa"
+    );
+
+    await user.selectOptions(
+      screen.getByLabelText("Group", { selector: "#leader-group" }),
+      "1"
+    );
+    await user.selectOptions(
+      screen.getByLabelText("Leader User", { selector: "#leader-user" }),
+      "1"
+    );
+    await user.click(screen.getByRole("button", { name: "Set Leader" }));
+    expect(setGroupLeader).toHaveBeenCalledWith(1, 1);
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Leader group berhasil ditetapkan."
     );
 
     await user.type(

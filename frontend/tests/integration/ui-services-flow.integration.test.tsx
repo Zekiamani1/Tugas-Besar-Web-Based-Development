@@ -195,14 +195,13 @@ describe("React UI components + real HTTP services (MSW integration)", () => {
     ).toBeInTheDocument();
   });
 
-  it("drives full MigrationManager create, PUT edit, explain, execute, and rollback failure via HTTP services", async () => {
+  it("drives full MigrationManager create, PUT edit, explain, submit for approval, inline review decision, and rollback filter via HTTP services", async () => {
     const user = userEvent.setup();
     await authService.login("budi_developer", "budi123");
-    const loaded = await loadMigrationsData(
-      1,
-      backend.getActiveSessionCookie(),
-      TEST_BACKEND_URL
-    );
+    const loaded = await loadMigrationsData(1, {
+      cookieHeader: backend.getActiveSessionCookie(),
+      baseUrl: TEST_BACKEND_URL,
+    });
 
     render(
       <Providers>
@@ -211,24 +210,32 @@ describe("React UI components + real HTTP services (MSW integration)", () => {
           canEdit={loaded.canEdit}
           initialDrafts={loaded.drafts}
           initialHistory={loaded.history}
+          initialPosition={loaded.position}
+          initialPendingReviews={loaded.pendingReviews}
         />
       </Providers>
     );
 
     await user.type(
-      screen.getByLabelText("SQL Query", { selector: "#draft-sql" }),
+      screen.getByLabelText("SQL Up", { selector: "#create-draft-sql-up" }),
       "CREATE TABLE orders (id INT);"
+    );
+    await user.type(
+      screen.getByLabelText("SQL Down", {
+        selector: "#create-draft-sql-down",
+      }),
+      "DROP TABLE orders;"
     );
     await user.click(screen.getByRole("button", { name: "Create Draft" }));
     expect(
       await screen.findByRole("heading", { level: 2, name: "Migration #2" })
     ).toBeInTheDocument();
 
-    const editArea = screen.getByLabelText("SQL Query", {
-      selector: "#edit-sql",
+    const editUp = screen.getByLabelText("SQL Up", {
+      selector: "#edit-draft-sql-up",
     });
-    await user.clear(editArea);
-    await user.type(editArea, "CREATE TABLE orders (id SERIAL PRIMARY KEY);");
+    await user.clear(editUp);
+    await user.type(editUp, "CREATE TABLE orders (id SERIAL PRIMARY KEY);");
     await user.click(screen.getByRole("button", { name: "Save Draft" }));
     expect(await screen.findByRole("status")).toHaveTextContent(
       "draft updated"
@@ -239,31 +246,33 @@ describe("React UI components + real HTTP services (MSW integration)", () => {
       await screen.findByText(/Seq Scan on public\.produk/)
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Execute" }));
     await user.click(
-      screen.getByRole("button", { name: "Konfirmasi Execute" })
+      screen.getByRole("button", { name: "Submit untuk Approval" })
     );
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      "Migration berhasil dijalankan."
-    );
-
-    // Failed execution persists FAILED record into history
-    await user.type(
-      screen.getByLabelText("SQL Query", { selector: "#draft-sql" }),
-      "FAIL INVALID SQL;"
-    );
-    await user.click(screen.getByRole("button", { name: "Create Draft" }));
     expect(
-      await screen.findByRole("heading", { level: 2, name: "Migration #3" })
+      await screen.findByRole("link", { name: "Buka Review #1" })
+    ).toHaveAttribute("href", "/databases/1/migrations/2/reviews/1");
+
+    await user.click(screen.getByRole("tab", { name: /Pending Reviews/ }));
+    expect(
+      await screen.findByRole("link", { name: "Review #1" })
+    ).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: "Approve" })[0]);
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Persetujuan group berhasil disimpan."
+    );
+    expect(
+      await screen.findByText(
+        "Tidak ada review yang menunggu keputusan Anda."
+      )
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Execute" }));
+    await user.click(screen.getByRole("tab", { name: "Migrations" }));
     await user.click(
-      screen.getByRole("button", { name: "Konfirmasi Execute" })
+      screen.getByLabelText("Sembunyikan pasangan rollback", {
+        selector: "#hide-rollback-toggle",
+      })
     );
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "execution failed and rolled back"
-    );
-    expect(screen.getAllByText("FAILED").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Total eksekusi tampil:/)).toBeInTheDocument();
   });
 });

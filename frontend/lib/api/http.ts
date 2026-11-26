@@ -22,6 +22,7 @@ export function getApiBaseUrl(): string {
 
 export interface RequestJsonOptions extends RequestInit {
   cookieHeader?: string;
+  onResponse?: (response: Response) => void;
 }
 
 export async function requestJson<T>(
@@ -30,6 +31,7 @@ export async function requestJson<T>(
 ): Promise<T> {
   const {
     cookieHeader,
+    onResponse,
     headers: initHeaders,
     credentials = "include",
     ...rest
@@ -86,6 +88,8 @@ export async function requestJson<T>(
     }
     throw new ApiError(response.status, message);
   }
+
+  onResponse?.(response);
 
   return payload as T;
 }

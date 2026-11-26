@@ -9,7 +9,13 @@ import { MigrationManager } from "@/features/migrations/MigrationManager";
 import { ApiError } from "@/lib/api/http";
 import { loadMigrationsData } from "@/lib/api/server/migrations";
 import { getServerSessionContext } from "@/lib/api/server/session";
-import type { MigrationRecord } from "@/lib/types";
+import type {
+  MigrationJob,
+  MigrationPosition,
+  MigrationRecord,
+  MigrationReview,
+  MigrationTab,
+} from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -65,13 +71,45 @@ export default async function MigrationsPage({
       ? Number.parseInt(rawSelected, 10)
       : undefined;
 
+  const rawHideRollback = Array.isArray(resolvedSearch.hide_rollback)
+    ? resolvedSearch.hide_rollback[0]
+    : resolvedSearch.hide_rollback;
+  const hideRollback = rawHideRollback === "true";
+
+  const rawJobId = Array.isArray(resolvedSearch.job_id)
+    ? resolvedSearch.job_id[0]
+    : resolvedSearch.job_id;
+  const jobId =
+    rawJobId && /^\d+$/.test(rawJobId)
+      ? Number.parseInt(rawJobId, 10)
+      : undefined;
+
+  const rawTab = Array.isArray(resolvedSearch.tab)
+    ? resolvedSearch.tab[0]
+    : resolvedSearch.tab;
+  const activeTab: MigrationTab = rawTab === "reviews" ? "reviews" : "migrations";
+
   let redirectTarget: string | null = null;
   let canEdit = false;
   let drafts: MigrationRecord[] = [];
   let history: MigrationRecord[] = [];
+  let position: MigrationPosition = { activeHead: null, nextForward: null };
+  let pendingReviews: MigrationReview[] = [];
+  let initialJob: MigrationJob | null = null;
 
   try {
-    ({ canEdit, drafts, history } = await loadMigrationsData(parsedDbId));
+    ({
+      canEdit,
+      drafts,
+      history,
+      position,
+      pendingReviews,
+      initialJob,
+    } = await loadMigrationsData(parsedDbId, {
+      hideRollback,
+      jobId,
+      selectedId,
+    }));
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) {
       redirectTarget = "/login?reason=session";
@@ -103,7 +141,12 @@ export default async function MigrationsPage({
         canEdit={canEdit}
         initialDrafts={drafts}
         initialHistory={history}
+        initialPosition={position}
+        initialPendingReviews={pendingReviews}
+        initialHideRollback={hideRollback}
+        initialJob={initialJob}
         initialSelectedId={selectedId}
+        initialTab={activeTab}
       />
     </PageLayout>
   );

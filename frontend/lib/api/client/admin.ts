@@ -110,6 +110,32 @@ export const adminService: AdminService = {
     }
   },
 
+  async setGroupLeader(groupId, userId) {
+    if (
+      !Number.isSafeInteger(groupId) ||
+      groupId <= 0 ||
+      !Number.isSafeInteger(userId) ||
+      userId <= 0
+    ) {
+      return { ok: false, error: "Pilih group dan user yang valid." };
+    }
+    try {
+      await requestJson<null>("/admin/groups/leader", {
+        method: "POST",
+        body: JSON.stringify({ group_id: groupId, user_id: userId }),
+      });
+      return { ok: true, message: "Leader group berhasil ditetapkan." };
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          err instanceof Error && err.message
+            ? err.message
+            : "Leader group tidak dapat ditetapkan.",
+      };
+    }
+  },
+
   async setGroupDbAccess(groupId, targetDbId, accessLevel: AccessLevel) {
     if (
       !Number.isSafeInteger(groupId) ||

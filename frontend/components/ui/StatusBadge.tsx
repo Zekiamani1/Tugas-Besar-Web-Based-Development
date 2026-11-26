@@ -1,6 +1,6 @@
-import type { AccessLevel, MigrationStatus } from "@/lib/types";
+import type { AccessLevel, BadgeStatus } from "@/lib/types";
 
-export function StatusBadge({ status }: { status: MigrationStatus }) {
+export function StatusBadge({ status }: { status: BadgeStatus }) {
   return (
     <span className="status" data-status={status}>
       {status}
