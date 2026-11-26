@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"wbd/internal/models"
+	"wbd/internal/observability"
 	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/dbmanagement"
 	"wbd/internal/service/migration"
@@ -23,6 +25,17 @@ import (
 
 func TestMigrationAppIntegration(t *testing.T) {
 	ctx := context.Background()
+	var telemetry *observability.Runtime
+	traceID := fmt.Sprintf("%032x", time.Now().UnixNano())
+	if endpoint := os.Getenv("WBD_TEST_OTLP_ENDPOINT"); endpoint != "" {
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+		var err error
+		telemetry, err = observability.Setup(ctx, "wbd-api-integration")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = telemetry.Shutdown(context.Background()) })
+	}
 	internalContainer := startTestPostgres(t, "migration_app_internal")
 	targetContainer := startTestPostgres(t, "migration_app_target")
 	internalDB := openGorm(t, internalContainer)
@@ -48,6 +61,15 @@ func TestMigrationAppIntegration(t *testing.T) {
 	mig := migration.NewService(internalDB, dbm)
 	if err := mig.Initialize(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if telemetry != nil {
+		pool, err := internalDB.DB()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := observability.RegisterDatabaseMetrics(pool); err != nil {
+			t.Fatal(err)
+		}
 	}
 	targetID, err := dbm.RegisterTargetDB(ctx, models.TargetDBInfo{
 		Name:     "migration-app-target",
@@ -97,12 +119,22 @@ func TestMigrationAppIntegration(t *testing.T) {
 	}
 
 	app := NewAppWithConfig(ac, dbm, mig, CookieConfig{MigrationApproval: mig})
+	var handler http.Handler = app
+	if telemetry != nil {
+		handler, err = observability.HTTP(app)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	jsonRequest := func(path string, body any, cookie *http.Cookie) *httptest.ResponseRecorder {
 		t.Helper()
 		req := newJSONRequest(t, http.MethodPost, path, body)
+		if telemetry != nil && strings.HasSuffix(path, "/decision") {
+			req.Header.Set("traceparent", "00-"+traceID+"-0123456789abcdef-01")
+		}
 		req.AddCookie(cookie)
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		handler.ServeHTTP(rec, req)
 		return rec
 	}
 	login := func(username string) *http.Cookie {
@@ -112,7 +144,7 @@ func TestMigrationAppIntegration(t *testing.T) {
 			"password": "test-password",
 		})
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("login %s: status=%d body=%s", username, rec.Code, rec.Body.String())
 		}
@@ -144,7 +176,7 @@ func TestMigrationAppIntegration(t *testing.T) {
 			req.AddCookie(cookie)
 		}
 		rec := httptest.NewRecorder()
-		app.ServeHTTP(rec, req)
+		handler.ServeHTTP(rec, req)
 		return rec
 	}
 
@@ -323,5 +355,30 @@ func TestMigrationAppIntegration(t *testing.T) {
 	}
 	if rec := request(http.MethodGet, basePath, nil, viewerCookie); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "APPLIED") {
 		t.Fatalf("viewer history: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if telemetry != nil && os.Getenv("WBD_TEST_TEMPO_URL") != "" && rabbitConn != nil {
+		if err := telemetry.Shutdown(ctx); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(15 * time.Second)
+		var body string
+		for time.Now().Before(deadline) {
+			resp, e := http.Get(strings.TrimRight(os.Getenv("WBD_TEST_TEMPO_URL"), "/") + "/api/traces/" + traceID)
+			if e == nil {
+				data, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				body = string(data)
+			}
+			if strings.Contains(body, "database.query") {
+				break
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		for _, name := range []string{"http.request", "api.submit", "queue.publish", "worker.process", "database.lock", "migration.execute", "database.query"} {
+			if !strings.Contains(body, name) {
+				t.Errorf("production endpoint trace missing %s", name)
+			}
+		}
+		t.Logf("production approval endpoint trace: %s", traceID)
 	}
 }

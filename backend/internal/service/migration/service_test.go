@@ -1,10 +1,12 @@
 package migration
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,73 @@ import (
 	"wbd/internal/models"
 	"wbd/internal/service/interfaces"
 )
+
+func TestExplainLogsSuccessAndFailureWithoutSQLValues(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure=%v", fail), func(t *testing.T) {
+			target, targetMock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer target.Close()
+			svc, internalMock := newMockService(t, target)
+			internalMock.ExpectQuery(`SELECT .*FROM "migrations"`).WithArgs(7, 2, 1).
+				WillReturnRows(sqlmock.NewRows([]string{"id", "target_db_id", "sql_up"}).AddRow(7, 2, "SELECT 'private-value'"))
+			prepared := targetMock.ExpectPrepare("EXPLAIN SELECT")
+			if fail {
+				prepared.ExpectQuery().WillReturnError(errors.New("private-value"))
+			} else {
+				prepared.ExpectQuery().WillReturnRows(sqlmock.NewRows([]string{"QUERY PLAN"}).AddRow("Result"))
+			}
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+			defer slog.SetDefault(previous)
+			_, err = svc.ExplainMigration(context.Background(), 2, 7)
+			if (err != nil) != fail {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			output := logs.String()
+			status := `"status":"success"`
+			if fail {
+				status = `"status":"failed"`
+			}
+			if !strings.Contains(output, "migration.explain.start") || !strings.Contains(output, "migration.explain.result") || !strings.Contains(output, status) || strings.Contains(output, "private-value") {
+				t.Fatalf("unexpected log output: %s", output)
+			}
+			if err := targetMock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+			if err := internalMock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestInternalSQLLogsDoNotExposeParameters(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT").WithArgs("private-value").WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(1))
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	var value int
+	if err := loggedQueryRow(context.Background(), db, "SELECT $1", "private-value").Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	output := logs.String()
+	if !strings.Contains(output, "migration.internal_sql.start") || !strings.Contains(output, "migration.internal_sql.result") || strings.Contains(output, "private-value") {
+		t.Fatalf("unexpected SQL log: %s", output)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 type targetProvider struct {
 	interfaces.DBManagementService

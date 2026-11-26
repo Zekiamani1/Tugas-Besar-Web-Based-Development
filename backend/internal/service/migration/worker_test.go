@@ -1,12 +1,16 @@
 package migration
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +21,18 @@ import (
 
 	"wbd/internal/models"
 )
+
+type lockedLogBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+func (b *lockedLogBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.buffer.String() }
 
 func TestAsyncQueueAndWorker(t *testing.T) {
 	dsn, rabbitURL := os.Getenv("MIGRATION_TEST_DSN"), os.Getenv("RABBITMQ_TEST_URL")
@@ -265,10 +281,13 @@ func TestAsyncQueueAndWorker(t *testing.T) {
 			}
 		}
 		go func() { finished <- svc.ProcessJob(ctx, first, validateAny, hold) }()
+		released := false
 		defer func() {
-			close(release)
-			if err := <-finished; err != nil {
-				t.Error(err)
+			if !released {
+				close(release)
+				if err := <-finished; err != nil {
+					t.Error(err)
+				}
 			}
 		}()
 		select {
@@ -277,11 +296,27 @@ func TestAsyncQueueAndWorker(t *testing.T) {
 			t.Fatal("first job did not start")
 		}
 		instant := func(context.Context, models.MigrationJob) (JobResult, error) { return JobResult{}, nil }
-		if err := svc.ProcessJob(ctx, second, validateAny, instant); !errors.Is(err, ErrIntegrationPending) {
+		wait := &lockWaitState{}
+		waitingCtx := context.WithValue(ctx, lockWaitContextKey{}, wait)
+		if err := svc.ProcessJob(waitingCtx, second, validateAny, instant); !errors.Is(err, ErrIntegrationPending) {
 			t.Fatalf("same database was not locked: %v", err)
+		}
+		if wait.started.IsZero() {
+			t.Fatal("lock wait start was not recorded")
 		}
 		if err := svc.ProcessJob(ctx, other, validateAny, instant); err != nil {
 			t.Fatalf("different database blocked: %v", err)
+		}
+		close(release)
+		released = true
+		if err := <-finished; err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.ProcessJob(waitingCtx, second, validateAny, instant); err != nil {
+			t.Fatal(err)
+		}
+		if !wait.started.IsZero() {
+			t.Fatal("lock wait not cleared after acquisition")
 		}
 	})
 }
@@ -312,6 +347,10 @@ func TestBatchMigrationCheckpointAndResume(t *testing.T) {
 	if dsn == "" || rabbitURL == "" {
 		t.Skip("requires disposable MIGRATION_TEST_DSN and RABBITMQ_TEST_URL")
 	}
+	logs := &lockedLogBuffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	defer slog.SetDefault(previous)
 	u, err := url.Parse(dsn)
 	if err != nil {
 		t.Fatal("invalid test PostgreSQL URL")
@@ -407,6 +446,9 @@ func TestBatchMigrationCheckpointAndResume(t *testing.T) {
 		}
 	}
 	partial := waitStatus(jobID, StatusPartial)
+	if output := logs.String(); !strings.Contains(output, "migration.batch.sql.start") || strings.Contains(output, `"cursor":`) {
+		t.Fatalf("batch logs missing or contain cursor: %s", output)
+	}
 	if partial.CommittedBatches != 1 || partial.CommittedRows != 3 || partial.Cursor != 30 {
 		t.Fatalf("wrong first checkpoint: %+v", partial)
 	}

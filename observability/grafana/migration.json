@@ -1,0 +1,63 @@
+{
+  "uid": "wbd-migration",
+  "title": "Database Platform",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Jobs by status",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "max by (status) (wbd_migration_jobs)", "legendFormat": "{{status}}"}]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Job events per second",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (event, status) (rate(wbd_migration_job_events_total[5m]))", "legendFormat": "{{event}} {{status}}"}]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Migration duration p95",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(wbd_migration_job_duration_seconds_bucket[5m])))", "legendFormat": "p95"}],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Queue and lock wait p95",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(wbd_migration_queue_wait_seconds_bucket[5m])))", "legendFormat": "queue"},
+        {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(wbd_migration_lock_wait_duration_seconds_bucket[5m])))", "legendFormat": "lock"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Database connections",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (state, service_name) (wbd_database_connections)", "legendFormat": "{{service_name}} {{state}}"}]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Committed batch rows per second",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (action) (rate(wbd_migration_batch_rows_total[5m]))", "legendFormat": "{{action}}"}]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "HTTP requests per second",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (status) (rate(wbd_http_requests_total[5m]))", "legendFormat": "{{status}}"}]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Database connection wait",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(rate(wbd_database_connection_wait_duration_seconds_total[5m]))", "legendFormat": "seconds / second"}]
+    }
+  ]
+}
