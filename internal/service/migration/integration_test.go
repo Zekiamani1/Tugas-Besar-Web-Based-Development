@@ -315,6 +315,90 @@ func TestImportM1IsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPartialBatchCompensationPreservesPreviousPosition(t *testing.T) {
+	svc, db, target, schema := newPostgresService(t)
+	ctx := context.Background()
+	targetURL, err := url.Parse(os.Getenv("MIGRATION_TEST_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := targetURL.Query()
+	query.Set("search_path", schema)
+	targetURL.RawQuery = query.Encode()
+	svc.dbMgmt = postgresTargetProvider{dsn: targetURL.String(), t: t}
+	if err := svc.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	priorID, err := svc.CreateDraft(ctx, 1, "CREATE TABLE "+schema+".prior (id integer)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior, err := svc.ExecuteMigration(ctx, 1, priorID, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.ExecContext(ctx, "CREATE TABLE "+schema+".items (id bigint PRIMARY KEY, value integer NOT NULL); INSERT INTO "+schema+".items SELECT n, 0 FROM generate_series(1, 4) n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.ExecContext(ctx, "CREATE FUNCTION "+schema+".reject_later_batch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id = 3 AND NEW.value = 1 THEN RAISE EXCEPTION 'later batch failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_later_batch BEFORE UPDATE ON "+schema+".items FOR EACH ROW EXECUTE FUNCTION "+schema+".reject_later_batch()"); err != nil {
+		t.Fatal(err)
+	}
+	migrationID, err := svc.CreateDraftDefinition(ctx, 1, models.MigrationDraft{SQLUp: "UPDATE " + schema + ".items SET value=value+1 WHERE {{batch_predicate}}", SQLDown: "UPDATE " + schema + ".items SET value=value-1 WHERE {{batch_predicate}}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := svc.SubmitJob(ctx, models.MigrationJob{TargetDBID: 1, MigrationID: migrationID, Actor: "alice", Action: ActionApply, Mode: "BATCH", BatchSize: 2, BatchTable: schema + ".items", BatchAttribute: "id", Revision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ProcessJob(ctx, jobID, svc.validateAsyncJob, svc.executeAsyncJob); err != nil {
+		t.Fatal(err)
+	}
+	partial, err := svc.FindJob(ctx, 1, migrationID, jobID)
+	if err != nil || partial.Status != StatusPartial || partial.CommittedRows != 2 {
+		t.Fatalf("partial job: %+v, err=%v", partial, err)
+	}
+	rollbackID, err := svc.SubmitJob(ctx, models.MigrationJob{TargetDBID: 1, MigrationID: migrationID, Actor: "alice", Action: ActionRollback, Mode: "BATCH", BatchSize: 2, BatchTable: schema + ".items", BatchAttribute: "id", ExpectedExecutionID: int(partial.ExecutionID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE FUNCTION reject_partial_finalization() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.status = 'PARTIAL' AND NEW.status = 'FAILED' THEN RAISE EXCEPTION 'metadata write failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_partial_finalization BEFORE UPDATE ON migration_jobs FOR EACH ROW EXECUTE FUNCTION reject_partial_finalization()").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ProcessJob(ctx, rollbackID, svc.validateAsyncJob, svc.executeAsyncJob); !errors.Is(err, ErrIntegrationPending) {
+		t.Fatalf("metadata failure should leave compensation uncertain: %v", err)
+	}
+	var sourceExecution models.MigrationExecution
+	if err := db.First(&sourceExecution, partial.ExecutionID).Error; err != nil || sourceExecution.Status != StatusPartial {
+		t.Fatalf("source execution should remain partial: %+v, err=%v", sourceExecution, err)
+	}
+	if err := db.Exec("DROP TRIGGER reject_partial_finalization ON migration_jobs; DROP FUNCTION reject_partial_finalization()").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ProcessJob(ctx, rollbackID, svc.validateAsyncJob, svc.executeAsyncJob); err != nil {
+		t.Fatalf("resume compensation finalization: %v", err)
+	}
+	rollback, err := svc.FindJob(ctx, 1, migrationID, rollbackID)
+	if err != nil || rollback.Status != "SUCCEEDED" {
+		t.Fatalf("compensation job: %+v, err=%v", rollback, err)
+	}
+	var remaining int
+	if err := target.QueryRowContext(ctx, "SELECT count(*) FROM "+schema+".items WHERE value <> 0").Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("remaining changed rows=%d, err=%v", remaining, err)
+	}
+	position, err := svc.GetPosition(ctx, 1)
+	if err != nil || position.ActiveHead == nil || position.ActiveHead.ExecutionID != prior.ExecutionID {
+		t.Fatalf("position after compensation: %+v, err=%v", position, err)
+	}
+	var execution models.MigrationExecution
+	if err := db.First(&execution, rollback.ExecutionID).Error; err != nil || execution.RevertsExecutionID == nil || *execution.RevertsExecutionID != int(partial.ExecutionID) {
+		t.Fatalf("compensation history: %+v, err=%v", execution, err)
+	}
+	if err := db.First(&sourceExecution, partial.ExecutionID).Error; err != nil || sourceExecution.Status != StatusFailed || !strings.Contains(sourceExecution.Error, "later batch failure") {
+		t.Fatalf("original failure history: %+v, err=%v", sourceExecution, err)
+	}
+}
+
 func TestPersistedReservationBlocksSameDatabase(t *testing.T) {
 	svc, db, _, _ := newPostgresService(t)
 	ctx := context.Background()

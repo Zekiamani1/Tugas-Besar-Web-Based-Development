@@ -136,11 +136,16 @@ func (s *Service) reserveReversalAttempt(ctx context.Context, jobID, targetDBID,
 			candidates = position.forward
 		}
 		var expected models.MigrationExecution
-		if len(candidates) == 0 && action == ActionRollback && jobID > 0 {
+		var partialSource bool
+		if action == ActionRollback && jobID > 0 {
 			var source models.MigrationJob
-			if err := meta.Where("execution_id = ? AND status = ? AND mode = ?", expectedExecutionID, StatusPartial, "BATCH").First(&source).Error; err != nil {
-				return models.MigrationExecution{}, 0, ErrInvalidPosition
+			err := meta.Where("execution_id = ? AND migration_id = ? AND target_db_id = ? AND status = ? AND mode = ?", expectedExecutionID, migrationID, targetDBID, StatusPartial, "BATCH").First(&source).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return models.MigrationExecution{}, 0, err
 			}
+			partialSource = err == nil
+		}
+		if partialSource {
 			if err := meta.Where("id = ? AND migration_id = ? AND target_db_id = ? AND status = ?", expectedExecutionID, migrationID, targetDBID, StatusPartial).First(&expected).Error; err != nil {
 				return models.MigrationExecution{}, 0, ErrInvalidPosition
 			}

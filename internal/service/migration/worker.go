@@ -244,7 +244,11 @@ func (s *Service) ProcessJob(ctx context.Context, id int, validate JobValidator,
 		return ErrIntegrationPending
 	}
 	var blocked int64
-	if err := s.internalDB.WithContext(ctx).Model(&models.MigrationJob{}).Where("target_db_id = ? AND id <> ? AND status IN ?", job.TargetDBID, id, []string{"RUNNING", "PARTIAL", "PARTIALLY_REVERTED", "UNCERTAIN"}).Count(&blocked).Error; err != nil {
+	blockers := s.internalDB.WithContext(ctx).Model(&models.MigrationJob{}).Where("target_db_id = ? AND id <> ? AND status IN ?", job.TargetDBID, id, []string{"RUNNING", "PARTIAL", "PARTIALLY_REVERTED", "UNCERTAIN"})
+	if job.Action == ActionRollback && job.Mode == "BATCH" && job.ExpectedExecutionID > 0 {
+		blockers = blockers.Where("NOT (migration_id = ? AND execution_id = ? AND status = ? AND mode = ?)", job.MigrationID, job.ExpectedExecutionID, StatusPartial, "BATCH")
+	}
+	if err := blockers.Count(&blocked).Error; err != nil {
 		return err
 	}
 	if blocked > 0 {
@@ -793,9 +797,31 @@ func (s *Service) completeCompensation(ctx context.Context, job models.Migration
 			return JobResult{}, err
 		}
 		if source.Status == StatusPartial {
-			_ = s.finishAsyncExecution(ctx, source, StatusFailed, 0, errors.New("partial migration compensated by rollback"))
-			_ = s.internalDB.WithContext(context.WithoutCancel(ctx)).Model(&models.MigrationJob{}).Where("execution_id = ?", source.ID).Updates(map[string]any{"status": StatusFailed, "error_message": "partial migration was compensated by rollback"}).Error
-			if err := s.finishAsyncExecution(ctx, execution, StatusCompensated, 0, nil); err != nil {
+			err := s.internalDB.WithContext(context.WithoutCancel(ctx)).Transaction(func(tx *gorm.DB) error {
+				sourceResult := tx.Model(&models.MigrationExecution{}).Where("id = ? AND status = ?", source.ID, StatusPartial).Update("status", StatusFailed)
+				if sourceResult.Error != nil {
+					return sourceResult.Error
+				}
+				if sourceResult.RowsAffected != 1 {
+					return ErrJobConflict
+				}
+				jobResult := tx.Model(&models.MigrationJob{}).Where("execution_id = ? AND status = ?", source.ID, StatusPartial).Update("status", StatusFailed)
+				if jobResult.Error != nil {
+					return jobResult.Error
+				}
+				if jobResult.RowsAffected != 1 {
+					return ErrJobConflict
+				}
+				rollbackResult := tx.Model(&models.MigrationExecution{}).Where("id = ? AND status IN ?", execution.ID, []string{StatusRunning, StatusUncertain, StatusPartial, StatusPartialReverted}).Updates(map[string]any{"status": StatusCompensated, "version": 0, "finished_at": time.Now().UTC(), "error": ""})
+				if rollbackResult.Error != nil {
+					return rollbackResult.Error
+				}
+				if rollbackResult.RowsAffected != 1 {
+					return ErrJobConflict
+				}
+				return nil
+			})
+			if err != nil {
 				return JobResult{Status: "UNCERTAIN"}, fmt.Errorf("%w: %v", ErrHistoryUpdateUncertain, err)
 			}
 		} else if err := s.finishAsyncExecution(ctx, execution, StatusApplied, version, nil); err != nil {
