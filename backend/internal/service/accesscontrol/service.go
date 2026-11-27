@@ -510,7 +510,7 @@ func (s *Service) AssignUserToGroup(ctx context.Context, userID, groupID int) er
 
 		var group models.Group
 
-		if err := tx.First(&group, groupID).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&group, groupID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return fmt.Errorf("group %d not found", groupID)
 			}
@@ -574,7 +574,7 @@ func (s *Service) SetGroupDBAccess(ctx context.Context, groupID, targetDBID int,
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var group models.Group
 
-		if err := tx.First(&group, groupID).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&group, groupID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return fmt.Errorf("group %d not found", groupID)
 			}
@@ -640,6 +640,116 @@ func (s *Service) SetGroupDBAccess(ctx context.Context, groupID, targetDBID int,
 }
 
 var ErrDBAccessDenied = errors.New("database access denied")
+
+var ErrGroupLeaderRemoval = errors.New("group leader must be replaced before removing the member")
+var ErrAccessChangeBusy = errors.New("access cannot be removed while a migration review or job is active")
+var ErrAccessRelationNotFound = errors.New("group membership or database access not found")
+
+// lockAccessDatabases coordinates access removal with the worker's database lock
+// and the migration review transaction lock, in a deterministic order.
+func lockAccessDatabases(tx *gorm.DB, databaseIDs []int) error {
+	for _, id := range databaseIDs {
+		var acquired bool
+		if err := tx.Raw("SELECT pg_try_advisory_xact_lock(3111, ?)", id).Scan(&acquired).Error; err != nil {
+			return err
+		}
+		if !acquired {
+			return ErrAccessChangeBusy
+		}
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(3110, ?)", id).Error; err != nil {
+			return err
+		}
+		var count int64
+		if err := tx.Table("migration_reviews").Where("target_db_id = ? AND status = ?", id, "PENDING_REVIEW").Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return ErrAccessChangeBusy
+		}
+		if err := tx.Table("migration_jobs").Where("target_db_id = ? AND status IN ?", id, []string{"QUEUED", "RUNNING", "PARTIAL", "PARTIALLY_REVERTED", "UNCERTAIN"}).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return ErrAccessChangeBusy
+		}
+	}
+	return nil
+}
+
+func (s *Service) RemoveUserFromGroup(ctx context.Context, userID, groupID int) (resultErr error) {
+	defer func() {
+		status := "success"
+		if resultErr != nil {
+			status = "failed"
+		}
+		slog.InfoContext(ctx, "group member removal finished", "event", "group.member.removed", "actor", observability.Actor(ctx), "group_id", groupID, "user_id", userID, "status", status)
+	}()
+	if userID <= 0 || groupID <= 0 {
+		return ErrAccessRelationNotFound
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var group models.Group
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&group, groupID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrAccessRelationNotFound
+		} else if err != nil {
+			return err
+		}
+		if group.LeaderID != nil && *group.LeaderID == userID {
+			return ErrGroupLeaderRemoval
+		}
+		var ids []int
+		if err := tx.Model(&models.GroupDBAccess{}).Where("group_id = ?", groupID).Order("target_db_id").Pluck("target_db_id", &ids).Error; err != nil {
+			return err
+		}
+		if err := lockAccessDatabases(tx, ids); err != nil {
+			return err
+		}
+		result := tx.Where("group_id = ? AND user_id = ?", groupID, userID).Delete(&models.UserGroup{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrAccessRelationNotFound
+		}
+		return revokeUserSessions(tx, []int{userID})
+	})
+}
+
+func (s *Service) RevokeGroupDBAccess(ctx context.Context, groupID, targetDBID int) (resultErr error) {
+	defer func() {
+		status := "success"
+		if resultErr != nil {
+			status = "failed"
+		}
+		slog.InfoContext(ctx, "group database access revocation finished", "event", "group.database_access.revoked", "actor", observability.Actor(ctx), "group_id", groupID, "database", targetDBID, "status", status)
+	}()
+	if groupID <= 0 || targetDBID <= 0 {
+		return ErrAccessRelationNotFound
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var group models.Group
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&group, groupID).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrAccessRelationNotFound
+		} else if err != nil {
+			return err
+		}
+		if err := lockAccessDatabases(tx, []int{targetDBID}); err != nil {
+			return err
+		}
+		result := tx.Where("group_id = ? AND target_db_id = ?", groupID, targetDBID).Delete(&models.GroupDBAccess{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrAccessRelationNotFound
+		}
+		var ids []int
+		if err := tx.Model(&models.UserGroup{}).Where("group_id = ?", groupID).Pluck("user_id", &ids).Error; err != nil {
+			return err
+		}
+		return revokeUserSessions(tx, ids)
+	})
+}
 
 func (s *Service) EvaluateDBAccess(ctx context.Context, userID, targetDBID int, requiredLevel string) error {
 	if userID <= 0 {

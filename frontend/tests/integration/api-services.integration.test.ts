@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { http, HttpResponse } from "msw";
 import {
   afterAll,
   afterEach,
@@ -65,6 +66,23 @@ function readDocumentCookie(name: string): string | undefined {
 }
 
 describe("Frontend API services & SSR loaders (direct Go CORS backend via MSW)", () => {
+  it("sends access removals using DELETE and displays server conflicts", async () => {
+    const calls: string[] = [];
+    backend.server.use(
+      http.delete(`${TEST_BACKEND_URL}/admin/groups/:groupId/members/:userId`, ({ params }) => {
+        calls.push(`member:${params.groupId}:${params.userId}`);
+        return new HttpResponse(null, { status: 204 });
+      }),
+      http.delete(`${TEST_BACKEND_URL}/admin/groups/:groupId/databases/:dbId/access`, ({ params }) => {
+        calls.push(`access:${params.groupId}:${params.dbId}`);
+        return HttpResponse.json({ error: "A migration is still active." }, { status: 409 });
+      })
+    );
+    expect((await adminService.removeUserFromGroup(3, 2)).ok).toBe(true);
+    expect(await adminService.revokeGroupDbAccess(2, 4)).toEqual({ ok: false, error: "A migration is still active." });
+    expect(calls).toEqual(["member:2:3", "access:2:4"]);
+  });
+
   it("runs authService, adminService, databaseService, and migrationService directly against MSW backend", async () => {
     const badLogin = await authService.login("admin", "wrong-pass");
     expect(badLogin).toEqual({

@@ -19,6 +19,8 @@ type AccessControlService interface {
 	ListGroupDBAccess(ctx context.Context) ([]models.GroupDBAccessSummary, error)
 	CreateGroup(ctx context.Context, groupName string) error
 	AssignUserToGroup(ctx context.Context, userID, groupID int) error
+	RemoveUserFromGroup(ctx context.Context, userID, groupID int) error
+	RevokeGroupDBAccess(ctx context.Context, groupID, targetDBID int) error
 	SetGroupDBAccess(ctx context.Context, groupID, targetDBID int, accessLevel string) error
 	EvaluateDBAccess(ctx context.Context, userID, targetDBID int, requiredLevel string) error
 	IsAdmin(ctx context.Context, userID int) (bool, error)

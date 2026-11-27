@@ -50,12 +50,30 @@ function createFakeAdminService(
     assignUserToGroup: vi.fn(),
     setGroupLeader: vi.fn(),
     setGroupDbAccess: vi.fn(),
+    removeUserFromGroup: vi.fn(),
+    revokeGroupDbAccess: vi.fn(),
     registerDatabase: vi.fn(),
     ...overrides,
   };
 }
 
 describe("AdminPanel", () => {
+  it("removes a member and revokes database access through admin actions", async () => {
+    const user = userEvent.setup();
+    const removeUserFromGroup = vi.fn(async () => ({ ok: true as const }));
+    const revokeGroupDbAccess = vi.fn(async () => ({ ok: true as const }));
+    const admin = createFakeAdminService({ removeUserFromGroup, revokeGroupDbAccess });
+    render(<Providers services={{ admin }}><AdminPanel initialUsers={INITIAL_USERS} initialGroups={INITIAL_GROUPS} initialDatabases={INITIAL_DATABASES} /></Providers>);
+    await user.selectOptions(screen.getByLabelText("Group", { selector: "#remove-group" }), "1");
+    await user.selectOptions(screen.getByLabelText("User", { selector: "#remove-user" }), "1");
+    await user.click(screen.getByRole("button", { name: "Remove User" }));
+    expect(removeUserFromGroup).toHaveBeenCalledWith(1, 1);
+    await user.selectOptions(screen.getByLabelText("Group", { selector: "#revoke-group" }), "1");
+    await user.selectOptions(screen.getByLabelText("Database", { selector: "#revoke-db" }), "1");
+    await user.click(screen.getByRole("button", { name: "Revoke Access" }));
+    expect(revokeGroupDbAccess).toHaveBeenCalledWith(1, 1);
+  });
+
   it("submits admin forms via injected adminService, handles validation errors, and switches list tabs", async () => {
     const user = userEvent.setup();
     const newUser: UserSummary = { id: 3, username: "andi_qa", isAdmin: false };

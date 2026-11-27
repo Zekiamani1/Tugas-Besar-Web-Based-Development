@@ -6,7 +6,7 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
 
-FROM oven/bun:1.2-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -17,10 +17,10 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-RUN bun run build
+RUN ./node_modules/.bin/next build
 
 
-FROM oven/bun:1.2-alpine AS runner
+FROM node:22-alpine AS runner
 
 WORKDIR /app
 
@@ -38,4 +38,4 @@ USER nextjs
 
 EXPOSE 3000
 
-CMD ["bun", "server.js"]
+CMD ["node", "server.js"]
