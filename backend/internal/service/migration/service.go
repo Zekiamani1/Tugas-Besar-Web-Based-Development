@@ -21,6 +21,7 @@ import (
 	"gorm.io/gorm"
 
 	"wbd/internal/models"
+	"wbd/internal/observability"
 	"wbd/internal/service/interfaces"
 )
 
@@ -251,7 +252,7 @@ func (s *Service) GetLinearHistory(ctx context.Context, targetDBID int) ([]model
 	return views, nil
 }
 
-func (s *Service) ExplainMigration(ctx context.Context, targetDBID, migrationID int) (string, error) {
+func (s *Service) ExplainMigration(ctx context.Context, targetDBID, migrationID int) (_ string, resultErr error) {
 	if targetDBID <= 0 || migrationID <= 0 {
 		return "", ErrInvalidMigration
 	}
@@ -274,13 +275,28 @@ func (s *Service) ExplainMigration(ctx context.Context, targetDBID, migrationID 
 	if conn == nil {
 		return "", errors.New("target database connection is nil")
 	}
-	stmt, err := conn.PrepareContext(ctx, "EXPLAIN "+record.SQLUp)
+	query := "EXPLAIN " + record.SQLUp
+	queryCtx, span := otel.Tracer("wbd/database").Start(ctx, "database.explain")
+	started := time.Now()
+	safeQuery := observability.SafeSQL(query)
+	slog.InfoContext(queryCtx, "migration explain started", "event", "migration.explain.start", "actor", observability.Actor(ctx), "database", targetDBID, "migration_id", migrationID, "query", safeQuery)
+	defer func() {
+		status := "success"
+		if resultErr != nil {
+			status = "failed"
+			span.RecordError(errors.New("database explain failed"))
+			span.SetStatus(codes.Error, "database explain failed")
+		}
+		slog.InfoContext(queryCtx, "migration explain finished", "event", "migration.explain.result", "actor", observability.Actor(ctx), "database", targetDBID, "migration_id", migrationID, "status", status, "query", safeQuery, "duration_ms", time.Since(started).Milliseconds(), "error", observability.SafeError(resultErr), "sqlstate", observability.SQLState(resultErr))
+		span.End()
+	}()
+	stmt, err := conn.PrepareContext(queryCtx, query)
 	if err != nil {
 		return "", fmt.Errorf("prepare migration query plan: %w", err)
 	}
 	defer stmt.Close()
 
-	rows, err := stmt.QueryContext(ctx)
+	rows, err := stmt.QueryContext(queryCtx)
 	if err != nil {
 		return "", fmt.Errorf("query migration plan: %w", err)
 	}
@@ -485,7 +501,7 @@ func (s *Service) runAttemptForJob(ctx context.Context, execution models.Migrati
 	started := time.Now()
 	queryCtx, querySpan := otel.Tracer("wbd/async").Start(ctx, "database.query")
 	attrs := traceLogAttrs(queryCtx)
-	attrs = append(attrs, "event", "migration.sql.start", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "actor", execution.ExecutedBy, "query", redactSQL(execution.SQLSnapshot))
+	attrs = append(attrs, "event", "migration.sql.start", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "actor", execution.ExecutedBy, "query", observability.SafeSQL(execution.SQLSnapshot))
 	slog.InfoContext(queryCtx, "migration SQL started", attrs...)
 	result, execErr := targetTx.ExecContext(queryCtx, execution.SQLSnapshot)
 	rowsAffected := int64(0)
@@ -493,10 +509,10 @@ func (s *Service) runAttemptForJob(ctx context.Context, execution models.Migrati
 		rowsAffected, _ = result.RowsAffected()
 	}
 	attrs = traceLogAttrs(queryCtx)
-	attrs = append(attrs, "event", "migration.sql.result", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "actor", execution.ExecutedBy, "duration_ms", time.Since(started).Milliseconds(), "rows", rowsAffected, "error", redactSQL(errorString(execErr)), "sqlstate", sqlState(execErr), "parameters", []string{}, "query", redactSQL(execution.SQLSnapshot))
+	attrs = append(attrs, "event", "migration.sql.result", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "actor", execution.ExecutedBy, "duration_ms", time.Since(started).Milliseconds(), "rows", rowsAffected, "error", observability.SafeError(execErr), "sqlstate", sqlState(execErr), "parameters", []string{}, "query", observability.SafeSQL(execution.SQLSnapshot))
 	slog.InfoContext(queryCtx, "migration SQL finished", attrs...)
 	if execErr != nil {
-		querySpan.RecordError(execErr)
+		querySpan.RecordError(errors.New("database query failed"))
 		querySpan.SetStatus(codes.Error, "migration SQL failed")
 	}
 	querySpan.End()
@@ -511,11 +527,11 @@ func (s *Service) runAttemptForJob(ctx context.Context, execution models.Migrati
 			}
 			return &execution, ErrRetrySafe
 		}
-		slog.InfoContext(ctx, "migration transaction rollback finished", "event", "migration.transaction.rollback.result", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "duration_ms", time.Since(rollbackStarted).Milliseconds(), "error", redactSQL(errorString(execErr)))
+		slog.InfoContext(ctx, "migration transaction rollback finished", "event", "migration.transaction.rollback.result", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "duration_ms", time.Since(rollbackStarted).Milliseconds(), "error", observability.SafeError(execErr))
 		return fail(execErr)
 	}
 	if jobID > 0 {
-		if _, err := targetTx.ExecContext(ctx, `INSERT INTO wbd_migration_job_commits(job_id, execution_id, status, committed_at) VALUES ($1,$2,'COMMITTED',now())`, jobID, execution.ID); err != nil {
+		if _, err := loggedExec(ctx, targetTx, `INSERT INTO wbd_migration_job_commits(job_id, execution_id, status, committed_at) VALUES ($1,$2,'COMMITTED',now())`, jobID, execution.ID); err != nil {
 			_ = targetTx.Rollback()
 			return fail(err)
 		}
@@ -539,7 +555,7 @@ func (s *Service) runAttemptForJob(ctx context.Context, execution models.Migrati
 				}
 			}
 		}
-		slog.InfoContext(ctx, "migration transaction commit failed", "event", "migration.transaction.commit.result", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "duration_ms", time.Since(commitStarted).Milliseconds(), "error", redactSQL(err.Error()))
+		slog.InfoContext(ctx, "migration transaction commit failed", "event", "migration.transaction.commit.result", "job_id", jobID, "execution_id", execution.ID, "migration_id", execution.MigrationID, "database", execution.TargetDBID, "duration_ms", time.Since(commitStarted).Milliseconds(), "error", observability.SafeError(err))
 		uncertainErr := fmt.Errorf("%w: %v", ErrTargetCommitUncertain, err)
 		if saveErr := s.finishAttempt(ctx, &execution, StatusUncertain, 0, uncertainErr); saveErr != nil {
 			return nil, errors.Join(uncertainErr, saveErr)
@@ -572,8 +588,9 @@ type JobExecutor func(context.Context, models.MigrationJob) (JobResult, error)
 type JobValidator func(context.Context, models.MigrationJob) error
 
 func jobEvent(ctx context.Context, event string, job models.MigrationJob) {
+	observability.JobEvent(ctx, event, job.Status)
 	sc := trace.SpanContextFromContext(ctx)
-	slog.Info(event, "event", event, "job_id", job.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "actor", job.Actor, "status", job.Status, "attempt", job.Attempts, "trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
+	slog.InfoContext(ctx, event, "event", event, "job_id", job.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "actor", job.Actor, "status", job.Status, "attempt", job.Attempts, "trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
 }
 
 func traceLogAttrs(ctx context.Context) []any {

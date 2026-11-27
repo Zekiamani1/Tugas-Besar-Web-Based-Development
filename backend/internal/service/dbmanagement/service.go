@@ -4,15 +4,20 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"wbd/internal/models"
+	"wbd/internal/observability"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	"gorm.io/gorm"
 )
 
@@ -20,6 +25,23 @@ type Service struct {
 	internalDB *gorm.DB
 	conns      sync.Map // targetDBID (int) -> *sql.DB
 	infos      sync.Map // targetDBID (int) -> models.TargetDBInfo
+}
+
+func (s *Service) queryContext(ctx context.Context, conn *sql.DB, targetDBID int, query string, args ...any) (*sql.Rows, error) {
+	queryCtx, span := otel.Tracer("wbd/database").Start(ctx, "database.read")
+	defer span.End()
+	safeQuery := observability.SafeSQL(query)
+	actor := observability.Actor(ctx)
+	started := time.Now()
+	slog.InfoContext(queryCtx, "database query started", "event", "database.query.start", "actor", actor, "database", targetDBID, "query", safeQuery, "parameter_count", len(args))
+	rows, err := conn.QueryContext(queryCtx, query, args...)
+	status := "success"
+	if err != nil {
+		status = "failed"
+		span.SetStatus(codes.Error, "database query failed")
+	}
+	slog.InfoContext(queryCtx, "database query finished", "event", "database.query.result", "actor", actor, "database", targetDBID, "status", status, "query", safeQuery, "parameter_count", len(args), "duration_ms", time.Since(started).Milliseconds(), "error", observability.SafeError(err), "sqlstate", observability.SQLState(err))
+	return rows, err
 }
 
 func NewService(internalDB *gorm.DB) *Service {
@@ -157,7 +179,7 @@ func (s *Service) GetSchemas(ctx context.Context, targetDBID int) ([]string, err
 
 	switch strings.ToLower(strings.TrimSpace(info.DBType)) {
 	case "sqlite", "sqlite3":
-		rows, err := conn.QueryContext(ctx, "PRAGMA database_list")
+		rows, err := s.queryContext(ctx, conn, targetDBID, "PRAGMA database_list")
 		if err != nil {
 			return nil, err
 		}
@@ -182,9 +204,9 @@ func (s *Service) GetSchemas(ctx context.Context, targetDBID int) ([]string, err
 		var rows *sql.Rows
 		if info.DBName != "" {
 			query = "SELECT schema_name FROM information_schema.schemata WHERE schema_name = ?"
-			rows, err = conn.QueryContext(ctx, query, info.DBName)
+			rows, err = s.queryContext(ctx, conn, targetDBID, query, info.DBName)
 		} else {
-			rows, err = conn.QueryContext(ctx, query)
+			rows, err = s.queryContext(ctx, conn, targetDBID, query)
 		}
 		if err != nil {
 			return nil, err
@@ -205,7 +227,7 @@ func (s *Service) GetSchemas(ctx context.Context, targetDBID int) ([]string, err
 		return schemas, nil
 
 	default: // postgres, sqlmock
-		res, err := conn.QueryContext(ctx, `SELECT schema_name FROM information_schema.schemata`)
+		res, err := s.queryContext(ctx, conn, targetDBID, `SELECT schema_name FROM information_schema.schemata`)
 		if err != nil {
 			return nil, err
 		}
@@ -235,7 +257,7 @@ func (s *Service) GetTables(ctx context.Context, targetDBID int, schema string) 
 
 	switch strings.ToLower(strings.TrimSpace(info.DBType)) {
 	case "sqlite", "sqlite3":
-		rows, err := conn.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+		rows, err := s.queryContext(ctx, conn, targetDBID, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
 		if err != nil {
 			return nil, err
 		}
@@ -252,7 +274,7 @@ func (s *Service) GetTables(ctx context.Context, targetDBID int, schema string) 
 		return tables, nil
 
 	case "mysql":
-		rows, err := conn.QueryContext(ctx, `SELECT table_name FROM information_schema.tables WHERE table_schema = ?`, schema)
+		rows, err := s.queryContext(ctx, conn, targetDBID, `SELECT table_name FROM information_schema.tables WHERE table_schema = ?`, schema)
 		if err != nil {
 			return nil, err
 		}
@@ -269,7 +291,7 @@ func (s *Service) GetTables(ctx context.Context, targetDBID int, schema string) 
 		return tables, nil
 
 	default: // postgres, sqlmock
-		res, err := conn.QueryContext(ctx, `SELECT table_name FROM information_schema.tables WHERE table_schema = $1`, schema)
+		res, err := s.queryContext(ctx, conn, targetDBID, `SELECT table_name FROM information_schema.tables WHERE table_schema = $1`, schema)
 		if err != nil {
 			return nil, err
 		}
@@ -304,7 +326,7 @@ func (s *Service) GetTableDetails(ctx context.Context, targetDBID int, schema, t
 
 	switch strings.ToLower(strings.TrimSpace(info.DBType)) {
 	case "sqlite", "sqlite3":
-		cols, err := conn.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info("%s")`, tableName))
+		cols, err := s.queryContext(ctx, conn, targetDBID, fmt.Sprintf(`PRAGMA table_info("%s")`, tableName))
 		if err != nil {
 			return nil, err
 		}
@@ -338,7 +360,7 @@ func (s *Service) GetTableDetails(ctx context.Context, targetDBID int, schema, t
 			})
 		}
 
-		idxRows, err := conn.QueryContext(ctx, fmt.Sprintf(`PRAGMA index_list("%s")`, tableName))
+		idxRows, err := s.queryContext(ctx, conn, targetDBID, fmt.Sprintf(`PRAGMA index_list("%s")`, tableName))
 		if err == nil {
 			defer idxRows.Close()
 			for idxRows.Next() {
@@ -358,7 +380,7 @@ func (s *Service) GetTableDetails(ctx context.Context, targetDBID int, schema, t
 		return metadata, nil
 
 	case "mysql":
-		cols, err := conn.QueryContext(ctx, `SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = ? AND table_name = ?`, schema, tableName)
+		cols, err := s.queryContext(ctx, conn, targetDBID, `SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = ? AND table_name = ?`, schema, tableName)
 		if err != nil {
 			return nil, err
 		}
@@ -377,7 +399,7 @@ func (s *Service) GetTableDetails(ctx context.Context, targetDBID int, schema, t
 			return nil, err
 		}
 
-		constrains, err := conn.QueryContext(ctx, `SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_schema = ? AND table_name = ?`, schema, tableName)
+		constrains, err := s.queryContext(ctx, conn, targetDBID, `SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_schema = ? AND table_name = ?`, schema, tableName)
 		if err != nil {
 			return nil, err
 		}
@@ -394,7 +416,7 @@ func (s *Service) GetTableDetails(ctx context.Context, targetDBID int, schema, t
 			return nil, err
 		}
 
-		indexes, err := conn.QueryContext(ctx, `SELECT DISTINCT index_name, non_unique FROM information_schema.statistics WHERE table_schema = ? AND table_name = ?`, schema, tableName)
+		indexes, err := s.queryContext(ctx, conn, targetDBID, `SELECT DISTINCT index_name, non_unique FROM information_schema.statistics WHERE table_schema = ? AND table_name = ?`, schema, tableName)
 		if err != nil {
 			return nil, err
 		}
@@ -417,7 +439,7 @@ func (s *Service) GetTableDetails(ctx context.Context, targetDBID int, schema, t
 		return metadata, nil
 
 	default: // postgres, sqlmock
-		cols, err := conn.QueryContext(ctx, `SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`, schema, tableName)
+		cols, err := s.queryContext(ctx, conn, targetDBID, `SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`, schema, tableName)
 		if err != nil {
 			return nil, err
 		}
@@ -436,7 +458,7 @@ func (s *Service) GetTableDetails(ctx context.Context, targetDBID int, schema, t
 			return nil, err
 		}
 
-		constrains, err := conn.QueryContext(ctx, `SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_schema = $1 AND table_name = $2`, schema, tableName)
+		constrains, err := s.queryContext(ctx, conn, targetDBID, `SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_schema = $1 AND table_name = $2`, schema, tableName)
 		if err != nil {
 			return nil, err
 		}
@@ -453,7 +475,7 @@ func (s *Service) GetTableDetails(ctx context.Context, targetDBID int, schema, t
 			return nil, err
 		}
 
-		indexes, err := conn.QueryContext(ctx, `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2`, schema, tableName)
+		indexes, err := s.queryContext(ctx, conn, targetDBID, `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2`, schema, tableName)
 		if err != nil {
 			return nil, err
 		}
@@ -509,7 +531,7 @@ func (s *Service) GetTableData(ctx context.Context, targetDBID int, schema, tabl
 		args = []any{limit, offset}
 	}
 
-	datas, err := conn.QueryContext(ctx, query, args...)
+	datas, err := s.queryContext(ctx, conn, targetDBID, query, args...)
 	if err != nil {
 		return nil, err
 	}

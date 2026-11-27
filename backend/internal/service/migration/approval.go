@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -125,7 +126,14 @@ func (s *Service) ListPendingMigrationReviews(ctx context.Context, targetDBID, l
 	return result, nil
 }
 
-func (s *Service) SubmitMigration(ctx context.Context, submission interfaces.MigrationSubmission) (string, error) {
+func (s *Service) SubmitMigration(ctx context.Context, submission interfaces.MigrationSubmission) (reviewID string, resultErr error) {
+	defer func() {
+		status := "success"
+		if resultErr != nil {
+			status = "failed"
+		}
+		slog.InfoContext(ctx, "migration review submission finished", "event", "migration.review.submitted", "actor", submission.ActorID, "database", submission.TargetDBID, "migration_id", submission.MigrationID, "review_id", reviewID, "status", status)
+	}()
 	if submission.TargetDBID <= 0 || submission.MigrationID <= 0 || submission.ActorID <= 0 {
 		return "", ErrInvalidMigration
 	}
@@ -223,7 +231,18 @@ func (s *Service) SubmitMigration(ctx context.Context, submission interfaces.Mig
 	return strconv.Itoa(review.ID), nil
 }
 
-func (s *Service) DecideMigrationReview(ctx context.Context, reviewID, groupID, actorID int, decision string) error {
+func (s *Service) DecideMigrationReview(ctx context.Context, reviewID, groupID, actorID int, decision string) (resultErr error) {
+	defer func() {
+		status := "success"
+		if resultErr != nil {
+			status = "failed"
+		}
+		loggedDecision := decision
+		if decision != "APPROVED" && decision != "REJECTED" {
+			loggedDecision = "INVALID"
+		}
+		slog.InfoContext(ctx, "migration review decision finished", "event", "migration.review.decision", "actor", actorID, "review_id", reviewID, "group_id", groupID, "decision", loggedDecision, "status", status)
+	}()
 	if reviewID <= 0 || groupID <= 0 || actorID <= 0 || (decision != "APPROVED" && decision != "REJECTED") {
 		return ErrApprovalDecision
 	}

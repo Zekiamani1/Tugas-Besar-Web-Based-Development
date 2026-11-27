@@ -10,30 +10,33 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
-	"go.opentelemetry.io/otel"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
 	"wbd/internal/models"
+	"wbd/internal/observability"
 	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/dbmanagement"
 	"wbd/internal/service/migration"
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-	provider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(consoleSpans{}))
-	otel.SetTracerProvider(provider)
-	defer provider.Shutdown(context.Background())
+	telemetry, err := observability.Setup(context.Background(), "database-platform-worker")
+	if err != nil {
+		log.Fatalf("failed to initialize observability: %v", err)
+	}
+	defer observability.Shutdown(telemetry)
 
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		dsn = "host=localhost user=postgres password=postgres dbname=wbd port=5432 sslmode=disable"
 	}
-	internalDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	internalDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: observability.NewGormLogger()})
 	if err != nil {
 		log.Fatalf("failed to connect internal database: %v", err)
+	}
+	if err := observability.RegisterGormQueryStart(internalDB); err != nil {
+		log.Fatalf("failed to initialize database logging: %v", err)
 	}
 	sqlDB, err := internalDB.DB()
 	if err != nil {
@@ -55,6 +58,9 @@ func main() {
 	if err := migSvc.Initialize(context.Background()); err != nil {
 		log.Fatalf("failed to initialize migration history: %v", err)
 	}
+	if err := observability.RegisterDatabaseMetrics(sqlDB); err != nil {
+		log.Fatalf("failed to initialize database metrics: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -66,17 +72,6 @@ func main() {
 		return migSvc.RunMigrationWorker(ctx, conn, "migration_jobs")
 	})
 }
-
-type consoleSpans struct{}
-
-func (consoleSpans) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
-	for _, span := range spans {
-		slog.Info("trace span", "event", "trace.span", "name", span.Name(), "trace_id", span.SpanContext().TraceID().String(), "span_id", span.SpanContext().SpanID().String(), "duration_ms", span.EndTime().Sub(span.StartTime()).Milliseconds(), "status", span.Status().Code.String())
-	}
-	return nil
-}
-
-func (consoleSpans) Shutdown(context.Context) error { return nil }
 
 func runRabbit(ctx context.Context, address string, run func(*amqp.Connection) error) {
 	for ctx.Err() == nil {

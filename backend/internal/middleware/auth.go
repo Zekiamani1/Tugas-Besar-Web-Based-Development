@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"wbd/internal/observability"
 	"wbd/internal/service/accesscontrol"
 	"wbd/internal/service/interfaces"
 )
@@ -71,6 +72,7 @@ func RequireAuth(ac interfaces.AccessControlService, next http.HandlerFunc, secu
 		}
 
 		ctx := context.WithValue(r.Context(), userIDContextKey, validation.UserID)
+		ctx = observability.WithActor(ctx, validation.UserID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

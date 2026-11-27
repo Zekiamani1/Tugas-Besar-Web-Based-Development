@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"wbd/internal/models"
+	"wbd/internal/observability"
 )
 
 type SessionConfig struct {
@@ -185,7 +187,15 @@ func (s *Service) ListGroupDBAccess(ctx context.Context) ([]models.GroupDBAccess
 	return accesses, nil
 }
 
-func (s *Service) Login(ctx context.Context, username, password string) (string, error) {
+func (s *Service) Login(ctx context.Context, username, password string) (sessionID string, resultErr error) {
+	var user models.User
+	defer func() {
+		status := "success"
+		if resultErr != nil {
+			status = "failed"
+		}
+		slog.InfoContext(ctx, "login finished", "event", "auth.login", "actor", user.ID, "status", status)
+	}()
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return "", errors.New("Username tidak boleh kosong")
@@ -194,7 +204,6 @@ func (s *Service) Login(ctx context.Context, username, password string) (string,
 		return "", errors.New("Password tidak boleh kosong")
 	}
 
-	var user models.User
 	tx := s.db.WithContext(ctx).
 		Where("username = ?", username).
 		First(&user)
@@ -457,7 +466,14 @@ func (s *Service) CreateGroup(ctx context.Context, groupName string) error {
 	return nil
 }
 
-func (s *Service) SetGroupLeader(ctx context.Context, groupID, userID int) error {
+func (s *Service) SetGroupLeader(ctx context.Context, groupID, userID int) (resultErr error) {
+	defer func() {
+		status := "success"
+		if resultErr != nil {
+			status = "failed"
+		}
+		slog.InfoContext(ctx, "group leader assignment finished", "event", "group.leader", "actor", observability.Actor(ctx), "group_id", groupID, "leader_id", userID, "status", status)
+	}()
 	if groupID <= 0 || userID <= 0 {
 		return errors.New("group and user IDs must be positive")
 	}
@@ -532,7 +548,14 @@ func (s *Service) AssignUserToGroup(ctx context.Context, userID, groupID int) er
 	return nil
 }
 
-func (s *Service) SetGroupDBAccess(ctx context.Context, groupID, targetDBID int, accessLevel string) error {
+func (s *Service) SetGroupDBAccess(ctx context.Context, groupID, targetDBID int, accessLevel string) (resultErr error) {
+	defer func() {
+		status := "success"
+		if resultErr != nil {
+			status = "failed"
+		}
+		slog.InfoContext(ctx, "database access update finished", "event", "group.database_access", "actor", observability.Actor(ctx), "group_id", groupID, "database", targetDBID, "status", status)
+	}()
 	if groupID <= 0 {
 		return errors.New("group id must be positive")
 	}

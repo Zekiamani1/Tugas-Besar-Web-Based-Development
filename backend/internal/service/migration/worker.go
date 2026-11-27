@@ -8,12 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"wbd/internal/models"
+	"wbd/internal/observability"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.opentelemetry.io/otel"
@@ -94,6 +94,13 @@ func (s *Service) handleWorkerDelivery(ctx context.Context, ch *amqp.Channel, qu
 	}
 	parent, _ := message.Headers["traceparent"].(string)
 	jobCtx := propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": parent})
+	wait := &lockWaitState{}
+	if value, ok := message.Headers["lock_wait_since"].(string); ok {
+		if started, err := time.Parse(time.RFC3339Nano, value); err == nil && !started.After(time.Now()) {
+			wait.started = started
+		}
+	}
+	jobCtx = context.WithValue(jobCtx, lockWaitContextKey{}, wait)
 	jobCtx, span := otel.Tracer("wbd/async").Start(jobCtx, "worker.process")
 	err := s.ProcessJob(jobCtx, payload.ID, validate, execute)
 	if err != nil {
@@ -106,7 +113,7 @@ func (s *Service) handleWorkerDelivery(ctx context.Context, ch *amqp.Channel, qu
 		if errors.Is(err, ErrScheduledRetry) {
 			count++
 		}
-		if publishErr := publishDelayedRetry(ctx, ch, queue, message.Body, parent, count); publishErr != nil {
+		if publishErr := publishDelayedRetry(ctx, ch, queue, message.Body, parent, count, wait.started); publishErr != nil {
 			_ = message.Nack(false, true)
 			return publishErr
 		}
@@ -144,10 +151,17 @@ func retryCount(headers amqp.Table) int {
 	}
 }
 
-func publishDelayedRetry(ctx context.Context, ch *amqp.Channel, queue string, body []byte, traceParent string, count int) error {
+type lockWaitContextKey struct{}
+type lockWaitState struct{ started time.Time }
+
+func publishDelayedRetry(ctx context.Context, ch *amqp.Channel, queue string, body []byte, traceParent string, count int, lockWaitStarted time.Time) error {
+	headers := amqp.Table{"traceparent": traceParent, "x-retry-count": int32(count)}
+	if !lockWaitStarted.IsZero() {
+		headers["lock_wait_since"] = lockWaitStarted.UTC().Format(time.RFC3339Nano)
+	}
 	confirm, err := ch.PublishWithDeferredConfirmWithContext(ctx, "", queue+".retry", true, false, amqp.Publishing{
 		ContentType: "application/json", DeliveryMode: amqp.Persistent, Body: body,
-		Headers: amqp.Table{"traceparent": traceParent, "x-retry-count": int32(count)},
+		Headers: headers,
 	})
 	if err != nil {
 		return err
@@ -206,6 +220,7 @@ func (s *Service) ProcessJob(ctx context.Context, id int, validate JobValidator,
 	if err := s.internalDB.WithContext(ctx).First(&job, id).Error; err != nil {
 		return err
 	}
+	ctx = context.WithValue(ctx, sqlJobContextKey{}, job)
 	pool, err := s.internalDB.DB()
 	if err != nil {
 		return err
@@ -216,8 +231,10 @@ func (s *Service) ProcessJob(ctx context.Context, id int, validate JobValidator,
 	}
 	defer lock.Close()
 	var acquired bool
+	lockStarted := time.Now()
 	lockCtx, lockSpan := otel.Tracer("wbd/async").Start(ctx, "database.lock")
-	err = lock.QueryRowContext(lockCtx, "SELECT pg_try_advisory_lock(3111, $1::integer)", job.TargetDBID).Scan(&acquired)
+	err = loggedQueryRow(lockCtx, lock, "SELECT pg_try_advisory_lock(3111, $1::integer)", job.TargetDBID).Scan(&acquired)
+	observability.LockAttempt(lockCtx, time.Since(lockStarted))
 	if err != nil {
 		lockSpan.SetStatus(codes.Error, "lock failed")
 	}
@@ -226,14 +243,23 @@ func (s *Service) ProcessJob(ctx context.Context, id int, validate JobValidator,
 		return err
 	}
 	if !acquired {
+		if wait, ok := ctx.Value(lockWaitContextKey{}).(*lockWaitState); ok && wait.started.IsZero() {
+			wait.started = lockStarted
+		}
 		return ErrIntegrationPending
 	}
+	waitStarted := lockStarted
+	if wait, ok := ctx.Value(lockWaitContextKey{}).(*lockWaitState); ok && !wait.started.IsZero() {
+		waitStarted = wait.started
+		wait.started = time.Time{}
+	}
+	observability.LockWait(ctx, time.Since(waitStarted))
 	jobEvent(ctx, "job.lock.acquired", job)
 	defer func() {
-		unlockCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		var unlocked bool
-		if err := lock.QueryRowContext(unlockCtx, "SELECT pg_advisory_unlock(3111, $1::integer)", job.TargetDBID).Scan(&unlocked); err != nil || !unlocked {
+		if err := loggedQueryRow(unlockCtx, lock, "SELECT pg_advisory_unlock(3111, $1::integer)", job.TargetDBID).Scan(&unlocked); err != nil || !unlocked {
 			_ = lock.Raw(func(any) error { return driver.ErrBadConn })
 		}
 	}()
@@ -283,6 +309,7 @@ func (s *Service) ProcessJob(ctx context.Context, id int, validate JobValidator,
 		return nil
 	}
 	if wasQueued {
+		observability.QueueWait(ctx, time.Since(job.CreatedAt))
 		job.Attempts++
 	}
 	job.Status = "RUNNING"
@@ -290,6 +317,7 @@ func (s *Service) ProcessJob(ctx context.Context, id int, validate JobValidator,
 		return err
 	}
 	jobEvent(ctx, "job.running", job)
+	jobStarted := time.Now()
 	execCtx, span := otel.Tracer("wbd/async").Start(ctx, "migration.execute")
 	result, execErr := execute(execCtx, job)
 	if execErr != nil {
@@ -348,6 +376,7 @@ func (s *Service) ProcessJob(ctx context.Context, id int, validate JobValidator,
 		return err
 	}
 	job.Status = updates["status"].(string)
+	observability.JobDuration(ctx, job.Status, time.Since(jobStarted))
 	event := "job.finished"
 	if job.Status == "QUEUED" {
 		event = "job.retry"
@@ -459,7 +488,7 @@ func (s *Service) runStandardJob(ctx context.Context, job models.MigrationJob) (
 func ensureCommitLedger(ctx context.Context, conn interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }) error {
-	_, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS wbd_migration_job_commits (job_id BIGINT PRIMARY KEY, execution_id BIGINT NOT NULL, status TEXT NOT NULL, committed_at TIMESTAMPTZ NOT NULL)`)
+	_, err := loggedExec(ctx, conn, `CREATE TABLE IF NOT EXISTS wbd_migration_job_commits (job_id BIGINT PRIMARY KEY, execution_id BIGINT NOT NULL, status TEXT NOT NULL, committed_at TIMESTAMPTZ NOT NULL)`)
 	return err
 }
 
@@ -467,7 +496,7 @@ func commitEvidence(ctx context.Context, conn interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, jobID int, executionID int) (bool, error) {
 	var stored int64
-	err := conn.QueryRowContext(ctx, `SELECT execution_id FROM wbd_migration_job_commits WHERE job_id = $1 AND status = 'COMMITTED'`, jobID).Scan(&stored)
+	err := loggedQueryRow(ctx, conn, `SELECT execution_id FROM wbd_migration_job_commits WHERE job_id = $1 AND status = 'COMMITTED'`, jobID).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -478,7 +507,7 @@ func findCommitEvidence(ctx context.Context, conn interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, jobID int) (int, bool, error) {
 	var executionID int
-	err := conn.QueryRowContext(ctx, `SELECT execution_id FROM wbd_migration_job_commits WHERE job_id=$1 AND status='COMMITTED'`, jobID).Scan(&executionID)
+	err := loggedQueryRow(ctx, conn, `SELECT execution_id FROM wbd_migration_job_commits WHERE job_id=$1 AND status='COMMITTED'`, jobID).Scan(&executionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -505,12 +534,6 @@ func errorString(err error) string {
 	return err.Error()
 }
 
-func redactSQL(query string) string {
-	return sqlStringLiteral.ReplaceAllString(query, "'[REDACTED]'")
-}
-
-var sqlStringLiteral = regexp.MustCompile(`'(?:''|[^'])*'`)
-
 const (
 	batchCheckpointDDL = `CREATE TABLE IF NOT EXISTS wbd_migration_batch_checkpoints (
 		job_id BIGINT PRIMARY KEY, execution_id BIGINT NOT NULL, source_job_id BIGINT NOT NULL,
@@ -531,13 +554,13 @@ func (s *Service) runBatchJob(ctx context.Context, job models.MigrationJob, exec
 	if err != nil {
 		return JobResult{}, s.failAsyncExecution(ctx, execution, err)
 	}
-	if _, err := conn.ExecContext(ctx, batchCheckpointDDL); err != nil {
+	if _, err := loggedExec(ctx, conn, batchCheckpointDDL); err != nil {
 		return JobResult{}, s.failAsyncExecution(ctx, execution, err)
 	}
-	if _, err := conn.ExecContext(ctx, batchScopeDDL); err != nil {
+	if _, err := loggedExec(ctx, conn, batchScopeDDL); err != nil {
 		return JobResult{}, s.failAsyncExecution(ctx, execution, err)
 	}
-	if _, err := conn.ExecContext(ctx, batchHistoryDDL); err != nil {
+	if _, err := loggedExec(ctx, conn, batchHistoryDDL); err != nil {
 		return JobResult{}, s.failAsyncExecution(ctx, execution, err)
 	}
 	if err := s.initializeBatchCheckpoint(ctx, conn, job, execution); err != nil {
@@ -556,17 +579,17 @@ func (s *Service) initializeBatchCheckpoint(ctx context.Context, conn *sql.DB, j
 	}
 	defer tx.Rollback()
 	var existing int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM wbd_migration_batch_checkpoints WHERE job_id = $1`, job.ID).Scan(&existing)
+	err = loggedQueryRow(ctx, tx, `SELECT 1 FROM wbd_migration_batch_checkpoints WHERE job_id = $1`, job.ID).Scan(&existing)
 	if err == nil {
 		var storedExecution, committed int64
-		if err := tx.QueryRowContext(ctx, `SELECT execution_id,committed_batches FROM wbd_migration_batch_checkpoints WHERE job_id=$1 FOR UPDATE`, job.ID).Scan(&storedExecution, &committed); err != nil {
+		if err := loggedQueryRow(ctx, tx, `SELECT execution_id,committed_batches FROM wbd_migration_batch_checkpoints WHERE job_id=$1 FOR UPDATE`, job.ID).Scan(&storedExecution, &committed); err != nil {
 			return err
 		}
 		if storedExecution != int64(execution.ID) {
 			if committed != 0 {
 				return ErrTargetCommitUncertain
 			}
-			if _, err := tx.ExecContext(ctx, `UPDATE wbd_migration_batch_checkpoints SET execution_id=$2,status='RUNNING',error='',complete=FALSE,updated_at=now() WHERE job_id=$1`, job.ID, execution.ID); err != nil {
+			if _, err := loggedExec(ctx, tx, `UPDATE wbd_migration_batch_checkpoints SET execution_id=$2,status='RUNNING',error='',complete=FALSE,updated_at=now() WHERE job_id=$1`, job.ID, execution.ID); err != nil {
 				return err
 			}
 		}
@@ -578,7 +601,7 @@ func (s *Service) initializeBatchCheckpoint(ctx context.Context, conn *sql.DB, j
 	table, attr := batchTableSQL(job), batchAttributeSQL(job)
 	var total int64
 	var minID, maxID sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT count(`+attr+`), min(`+attr+`::bigint), max(`+attr+`::bigint) FROM `+table+` WHERE `+attr+` IS NOT NULL`).Scan(&total, &minID, &maxID); err != nil {
+	if err := loggedQueryRow(ctx, tx, `SELECT count(`+attr+`), min(`+attr+`::bigint), max(`+attr+`::bigint) FROM `+table+` WHERE `+attr+` IS NOT NULL`).Scan(&total, &minID, &maxID); err != nil {
 		return err
 	}
 	cursor := int64(-1)
@@ -617,18 +640,18 @@ func (s *Service) initializeBatchCheckpoint(ctx context.Context, conn *sql.DB, j
 		}
 		sourceJobID = int64(job.SourceJobID)
 		var sourceCheckpoint batchCheckpoint
-		if err := tx.QueryRowContext(ctx, `SELECT cursor, total_rows, committed_batches, committed_rows, complete FROM wbd_migration_batch_checkpoints WHERE job_id = $1`, job.SourceJobID).Scan(&sourceCheckpoint.Cursor, &sourceCheckpoint.TotalRows, &sourceCheckpoint.CommittedBatches, &sourceCheckpoint.CommittedRows, &sourceCheckpoint.Complete); err != nil {
+		if err := loggedQueryRow(ctx, tx, `SELECT cursor, total_rows, committed_batches, committed_rows, complete FROM wbd_migration_batch_checkpoints WHERE job_id = $1`, job.SourceJobID).Scan(&sourceCheckpoint.Cursor, &sourceCheckpoint.TotalRows, &sourceCheckpoint.CommittedBatches, &sourceCheckpoint.CommittedRows, &sourceCheckpoint.Complete); err != nil {
 			return err
 		}
 		total = sourceCheckpoint.TotalRows
 		cursor = 0
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO wbd_migration_batch_checkpoints(job_id, execution_id, source_job_id, cursor, total_rows) VALUES ($1,$2,$3,$4,$5)`, job.ID, execution.ID, sourceJobID, cursor, total)
+	_, err = loggedExec(ctx, tx, `INSERT INTO wbd_migration_batch_checkpoints(job_id, execution_id, source_job_id, cursor, total_rows) VALUES ($1,$2,$3,$4,$5)`, job.ID, execution.ID, sourceJobID, cursor, total)
 	if err != nil {
 		return err
 	}
 	if job.Action == ActionApply {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO wbd_migration_batch_scope(job_id, attribute_value) SELECT $1, `+attr+`::bigint FROM `+table+` WHERE `+attr+` IS NOT NULL`, job.ID); err != nil {
+		if _, err := loggedExec(ctx, tx, `INSERT INTO wbd_migration_batch_scope(job_id, attribute_value) SELECT $1, `+attr+`::bigint FROM `+table+` WHERE `+attr+` IS NOT NULL`, job.ID); err != nil {
 			return err
 		}
 	}
@@ -656,7 +679,7 @@ func (s *Service) runBatchApply(ctx context.Context, conn *sql.DB, job models.Mi
 			return s.batchFailure(ctx, conn, job, execution, err)
 		}
 		if len(ids) == 0 {
-			if _, err := tx.ExecContext(ctx, `UPDATE wbd_migration_batch_checkpoints SET complete=TRUE, status='SUCCEEDED', updated_at=now() WHERE job_id=$1`, job.ID); err != nil {
+			if _, err := loggedExec(ctx, tx, `UPDATE wbd_migration_batch_checkpoints SET complete=TRUE, status='SUCCEEDED', updated_at=now() WHERE job_id=$1`, job.ID); err != nil {
 				_ = tx.Rollback()
 				return s.batchFailure(ctx, conn, job, execution, err)
 			}
@@ -670,11 +693,11 @@ func (s *Service) runBatchApply(ctx context.Context, conn *sql.DB, job models.Mi
 		started := time.Now()
 		queryCtx, span := otel.Tracer("wbd/async").Start(ctx, "batch.query")
 		attrs := traceLogAttrs(queryCtx)
-		attrs = append(attrs, "event", "migration.batch.sql.start", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "actor", job.Actor, "status", job.Status, "attempt", job.Attempts, "batch", cp.CommittedBatches+1, "query", redactSQL(batchSQL), "cursor", end)
+		attrs = append(attrs, "event", "migration.batch.sql.start", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "actor", job.Actor, "status", job.Status, "attempt", job.Attempts, "batch", cp.CommittedBatches+1, "query", observability.SafeSQL(batchSQL))
 		slog.InfoContext(queryCtx, "batch SQL started", attrs...)
 		result, execErr := tx.ExecContext(queryCtx, batchSQL)
 		if execErr != nil {
-			span.RecordError(execErr)
+			span.RecordError(errors.New("database query failed"))
 			span.SetStatus(codes.Error, "batch SQL failed")
 		}
 		span.End()
@@ -683,32 +706,33 @@ func (s *Service) runBatchApply(ctx context.Context, conn *sql.DB, job models.Mi
 			rows, _ = result.RowsAffected()
 		}
 		attrs = traceLogAttrs(queryCtx)
-		attrs = append(attrs, "event", "migration.batch.sql.result", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "actor", job.Actor, "status", job.Status, "attempt", job.Attempts, "batch", cp.CommittedBatches+1, "duration_ms", time.Since(started).Milliseconds(), "rows", rows, "error", redactSQL(errorString(execErr)), "sqlstate", sqlState(execErr), "parameters", []string{}, "query", redactSQL(batchSQL))
+		attrs = append(attrs, "event", "migration.batch.sql.result", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "actor", job.Actor, "status", job.Status, "attempt", job.Attempts, "batch", cp.CommittedBatches+1, "duration_ms", time.Since(started).Milliseconds(), "rows", rows, "error", observability.SafeError(execErr), "sqlstate", sqlState(execErr), "parameters", []string{}, "query", observability.SafeSQL(batchSQL))
 		slog.InfoContext(queryCtx, "batch SQL finished", attrs...)
 		if execErr != nil {
 			rollbackStarted := time.Now()
 			slog.InfoContext(queryCtx, "batch transaction rollback started", "event", "migration.batch.rollback.start", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "batch", cp.CommittedBatches+1)
 			rollbackErr := tx.Rollback()
-			slog.InfoContext(queryCtx, "batch transaction rollback finished", "event", "migration.batch.rollback.result", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "batch", cp.CommittedBatches+1, "duration_ms", time.Since(rollbackStarted).Milliseconds(), "error", redactSQL(errorString(rollbackErr)))
+			slog.InfoContext(queryCtx, "batch transaction rollback finished", "event", "migration.batch.rollback.result", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "batch", cp.CommittedBatches+1, "duration_ms", time.Since(rollbackStarted).Milliseconds(), "error", observability.SafeError(rollbackErr))
 			return s.batchFailure(ctx, conn, job, execution, execErr)
 		}
 		batchNumber := cp.CommittedBatches + 1
-		if _, err := tx.ExecContext(ctx, `INSERT INTO wbd_migration_batch_history(job_id,batch_number,cursor_start,cursor_end,committed_rows) VALUES($1,$2,$3,$4,$5)`, job.ID, batchNumber, cp.Cursor, end, rows); err != nil {
+		if _, err := loggedExec(ctx, tx, `INSERT INTO wbd_migration_batch_history(job_id,batch_number,cursor_start,cursor_end,committed_rows) VALUES($1,$2,$3,$4,$5)`, job.ID, batchNumber, cp.Cursor, end, rows); err != nil {
 			_ = tx.Rollback()
 			return s.batchFailure(ctx, conn, job, execution, err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE wbd_migration_batch_checkpoints SET cursor=$2, committed_batches=committed_batches+1, committed_rows=committed_rows+$3, updated_at=now() WHERE job_id=$1`, job.ID, end, rows); err != nil {
+		if _, err := loggedExec(ctx, tx, `UPDATE wbd_migration_batch_checkpoints SET cursor=$2, committed_batches=committed_batches+1, committed_rows=committed_rows+$3, updated_at=now() WHERE job_id=$1`, job.ID, end, rows); err != nil {
 			_ = tx.Rollback()
 			return s.batchFailure(ctx, conn, job, execution, err)
 		}
 		commitStarted := time.Now()
 		slog.InfoContext(queryCtx, "batch transaction commit started", "event", "migration.batch.commit.start", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "batch", batchNumber)
 		if err := tx.Commit(); err != nil {
-			slog.InfoContext(queryCtx, "batch transaction commit failed", "event", "migration.batch.commit.result", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "batch", batchNumber, "duration_ms", time.Since(commitStarted).Milliseconds(), "error", redactSQL(err.Error()))
+			slog.InfoContext(queryCtx, "batch transaction commit failed", "event", "migration.batch.commit.result", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "batch", batchNumber, "duration_ms", time.Since(commitStarted).Milliseconds(), "error", observability.SafeError(err))
 			return s.batchFailure(ctx, conn, job, execution, fmt.Errorf("%w: %v", ErrTargetCommitUncertain, err))
 		}
 		slog.InfoContext(queryCtx, "batch transaction committed", "event", "migration.batch.commit.result", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "batch", batchNumber, "duration_ms", time.Since(commitStarted).Milliseconds(), "status", "COMMITTED")
 		cp.Cursor, cp.CommittedBatches, cp.CommittedRows = end, batchNumber, cp.CommittedRows+rows
+		observability.BatchRows(ctx, job.Action, rows)
 		if err := s.saveJobProgress(ctx, job.ID, execution.ID, cp); err != nil {
 			return JobResult{Status: StatusPartial, ExecutionID: int64(execution.ID), CommittedBatches: cp.CommittedBatches, CommittedRows: cp.CommittedRows, TotalRows: cp.TotalRows, Cursor: cp.Cursor}, err
 		}
@@ -717,7 +741,7 @@ func (s *Service) runBatchApply(ctx context.Context, conn *sql.DB, job models.Mi
 
 func (s *Service) runBatchCompensation(ctx context.Context, conn *sql.DB, job models.MigrationJob, execution models.MigrationExecution, version int) (JobResult, error) {
 	var sourceJobID int
-	if err := conn.QueryRowContext(ctx, `SELECT source_job_id FROM wbd_migration_batch_checkpoints WHERE job_id=$1`, job.ID).Scan(&sourceJobID); err != nil {
+	if err := loggedQueryRow(ctx, conn, `SELECT source_job_id FROM wbd_migration_batch_checkpoints WHERE job_id=$1`, job.ID).Scan(&sourceJobID); err != nil {
 		return s.batchFailure(ctx, conn, job, execution, err)
 	}
 	for {
@@ -739,9 +763,9 @@ func (s *Service) runBatchCompensation(ctx context.Context, conn *sql.DB, job mo
 			order, flag = "ASC", true
 		}
 		var batchNumber, after, through int64
-		err = tx.QueryRowContext(ctx, `SELECT batch_number,cursor_start,cursor_end FROM wbd_migration_batch_history WHERE job_id=$1 AND reverted=$2 ORDER BY batch_number `+order+` LIMIT 1 FOR UPDATE`, sourceJobID, flag).Scan(&batchNumber, &after, &through)
+		err = loggedQueryRow(ctx, tx, `SELECT batch_number,cursor_start,cursor_end FROM wbd_migration_batch_history WHERE job_id=$1 AND reverted=$2 ORDER BY batch_number `+order+` LIMIT 1 FOR UPDATE`, sourceJobID, flag).Scan(&batchNumber, &after, &through)
 		if errors.Is(err, sql.ErrNoRows) {
-			if _, err := tx.ExecContext(ctx, `UPDATE wbd_migration_batch_checkpoints SET complete=TRUE,status='SUCCEEDED',updated_at=now() WHERE job_id=$1`, job.ID); err != nil {
+			if _, err := loggedExec(ctx, tx, `UPDATE wbd_migration_batch_checkpoints SET complete=TRUE,status='SUCCEEDED',updated_at=now() WHERE job_id=$1`, job.ID); err != nil {
 				_ = tx.Rollback()
 				return s.batchFailure(ctx, conn, job, execution, err)
 			}
@@ -758,10 +782,10 @@ func (s *Service) runBatchCompensation(ctx context.Context, conn *sql.DB, job mo
 		query := batchSQLForRange(job, execution.SQLSnapshot, after, through, sourceJobID)
 		started := time.Now()
 		queryCtx, span := otel.Tracer("wbd/async").Start(ctx, "batch.query")
-		slog.InfoContext(queryCtx, "batch compensation SQL started", "event", "migration.batch.sql.start", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "attempt", job.Attempts, "batch", batchNumber, "query", redactSQL(query), "cursor", through)
+		slog.InfoContext(queryCtx, "batch compensation SQL started", "event", "migration.batch.sql.start", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "attempt", job.Attempts, "batch", batchNumber, "query", observability.SafeSQL(query))
 		result, execErr := tx.ExecContext(queryCtx, query)
 		if execErr != nil {
-			span.RecordError(execErr)
+			span.RecordError(errors.New("database query failed"))
 			span.SetStatus(codes.Error, "batch compensation SQL failed")
 		}
 		span.End()
@@ -769,14 +793,14 @@ func (s *Service) runBatchCompensation(ctx context.Context, conn *sql.DB, job mo
 		if execErr == nil {
 			rows, _ = result.RowsAffected()
 		}
-		slog.InfoContext(queryCtx, "batch compensation SQL finished", append(traceLogAttrs(queryCtx), "event", "migration.batch.sql.result", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "actor", job.Actor, "attempt", job.Attempts, "batch", batchNumber, "duration_ms", time.Since(started).Milliseconds(), "rows", rows, "error", redactSQL(errorString(execErr)), "sqlstate", sqlState(execErr), "parameters", []string{}, "query", redactSQL(query))...)
+		slog.InfoContext(queryCtx, "batch compensation SQL finished", append(traceLogAttrs(queryCtx), "event", "migration.batch.sql.result", "job_id", job.ID, "execution_id", execution.ID, "migration_id", job.MigrationID, "database", job.TargetDBID, "actor", job.Actor, "attempt", job.Attempts, "batch", batchNumber, "duration_ms", time.Since(started).Milliseconds(), "rows", rows, "error", observability.SafeError(execErr), "sqlstate", sqlState(execErr), "parameters", []string{}, "query", observability.SafeSQL(query))...)
 		if execErr != nil {
 			_ = tx.Rollback()
 			return s.batchFailure(ctx, conn, job, execution, execErr)
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE wbd_migration_batch_history SET reverted=$3 WHERE job_id=$1 AND batch_number=$2`, sourceJobID, batchNumber, job.Action == ActionRollback)
+		_, err = loggedExec(ctx, tx, `UPDATE wbd_migration_batch_history SET reverted=$3 WHERE job_id=$1 AND batch_number=$2`, sourceJobID, batchNumber, job.Action == ActionRollback)
 		if err == nil {
-			_, err = tx.ExecContext(ctx, `UPDATE wbd_migration_batch_checkpoints SET committed_batches=committed_batches+1,committed_rows=committed_rows+$2,cursor=$3,updated_at=now() WHERE job_id=$1`, job.ID, rows, batchNumber)
+			_, err = loggedExec(ctx, tx, `UPDATE wbd_migration_batch_checkpoints SET committed_batches=committed_batches+1,committed_rows=committed_rows+$2,cursor=$3,updated_at=now() WHERE job_id=$1`, job.ID, rows, batchNumber)
 		}
 		if err != nil {
 			_ = tx.Rollback()
@@ -787,6 +811,7 @@ func (s *Service) runBatchCompensation(ctx context.Context, conn *sql.DB, job mo
 		}
 		cp.CommittedBatches++
 		cp.CommittedRows += rows
+		observability.BatchRows(ctx, job.Action, rows)
 		cp.Cursor = batchNumber
 		if err := s.saveJobProgress(ctx, job.ID, execution.ID, cp); err != nil {
 			status := StatusPartialReverted
@@ -840,12 +865,12 @@ func (s *Service) completeCompensation(ctx context.Context, job models.Migration
 
 func loadBatchCheckpoint(ctx context.Context, tx *sql.Tx, id int) (batchCheckpoint, error) {
 	var cp batchCheckpoint
-	err := tx.QueryRowContext(ctx, `SELECT cursor,total_rows,committed_batches,committed_rows,complete FROM wbd_migration_batch_checkpoints WHERE job_id=$1 FOR UPDATE`, id).Scan(&cp.Cursor, &cp.TotalRows, &cp.CommittedBatches, &cp.CommittedRows, &cp.Complete)
+	err := loggedQueryRow(ctx, tx, `SELECT cursor,total_rows,committed_batches,committed_rows,complete FROM wbd_migration_batch_checkpoints WHERE job_id=$1 FOR UPDATE`, id).Scan(&cp.Cursor, &cp.TotalRows, &cp.CommittedBatches, &cp.CommittedRows, &cp.Complete)
 	return cp, err
 }
 
 func nextBatchIDs(ctx context.Context, tx *sql.Tx, jobID int, cursor int64, batchSize int) ([]int64, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT attribute_value FROM wbd_migration_batch_scope WHERE job_id=$1 AND attribute_value>$2 ORDER BY attribute_value LIMIT $3`, jobID, cursor, batchSize)
+	rows, err := loggedQuery(ctx, tx, `SELECT attribute_value FROM wbd_migration_batch_scope WHERE job_id=$1 AND attribute_value>$2 ORDER BY attribute_value LIMIT $3`, jobID, cursor, batchSize)
 	if err != nil {
 		return nil, err
 	}
@@ -880,7 +905,7 @@ func (s *Service) completeBatchJob(ctx context.Context, job models.MigrationJob,
 
 func (s *Service) batchFailure(ctx context.Context, conn *sql.DB, job models.MigrationJob, execution models.MigrationExecution, cause error) (JobResult, error) {
 	var cp batchCheckpoint
-	err := conn.QueryRowContext(context.WithoutCancel(ctx), `UPDATE wbd_migration_batch_checkpoints SET status='PARTIAL', error=$2, updated_at=now() WHERE job_id=$1 RETURNING cursor,total_rows,committed_batches,committed_rows,complete`, job.ID, cause.Error()).Scan(&cp.Cursor, &cp.TotalRows, &cp.CommittedBatches, &cp.CommittedRows, &cp.Complete)
+	err := loggedQueryRow(context.WithoutCancel(ctx), conn, `UPDATE wbd_migration_batch_checkpoints SET status='PARTIAL', error=$2, updated_at=now() WHERE job_id=$1 RETURNING cursor,total_rows,committed_batches,committed_rows,complete`, job.ID, cause.Error()).Scan(&cp.Cursor, &cp.TotalRows, &cp.CommittedBatches, &cp.CommittedRows, &cp.Complete)
 	status := "FAILED"
 	if cp.CommittedBatches > 0 {
 		status = StatusPartial
