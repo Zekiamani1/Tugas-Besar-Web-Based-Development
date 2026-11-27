@@ -101,6 +101,8 @@ export interface AdminService {
   ): Promise<ActionResult<UserSummary>>;
   createGroup(groupName: string): Promise<ActionResult<Group>>;
   assignUserToGroup(userId: number, groupId: number): Promise<ActionResult>;
+  removeUserFromGroup(userId: number, groupId: number): Promise<ActionResult>;
+  revokeGroupDbAccess(groupId: number, targetDbId: number): Promise<ActionResult>;
   setGroupLeader(groupId: number, userId: number): Promise<ActionResult>;
   setGroupDbAccess(
     groupId: number,

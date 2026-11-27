@@ -12,6 +12,21 @@ import type { AdminService } from "../contract";
 import { requestJson } from "../http";
 
 export const adminService: AdminService = {
+  async removeUserFromGroup(userId, groupId) {
+    if (!Number.isSafeInteger(userId) || userId <= 0 || !Number.isSafeInteger(groupId) || groupId <= 0) return { ok: false, error: "Select a valid user and group." };
+    try {
+      await requestJson(`/admin/groups/${groupId}/members/${userId}`, { method: "DELETE" });
+      return { ok: true, message: "User removed from group." };
+    } catch (err) { return { ok: false, error: err instanceof Error ? err.message : "Could not remove user from group." }; }
+  },
+
+  async revokeGroupDbAccess(groupId, targetDbId) {
+    if (!Number.isSafeInteger(groupId) || groupId <= 0 || !Number.isSafeInteger(targetDbId) || targetDbId <= 0) return { ok: false, error: "Select a valid group and database." };
+    try {
+      await requestJson(`/admin/groups/${groupId}/databases/${targetDbId}/access`, { method: "DELETE" });
+      return { ok: true, message: "Database access revoked." };
+    } catch (err) { return { ok: false, error: err instanceof Error ? err.message : "Could not revoke database access." }; }
+  },
   async listUsers() {
     const res = await requestJson<{ users?: UserSummary[] }>("/admin/users");
     return Array.isArray(res.users) ? res.users : [];

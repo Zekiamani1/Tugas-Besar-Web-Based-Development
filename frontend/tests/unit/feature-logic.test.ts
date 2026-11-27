@@ -59,6 +59,8 @@ function createFakeAdminService(
     assignUserToGroup: vi.fn(),
     setGroupLeader: vi.fn(),
     setGroupDbAccess: vi.fn(),
+    removeUserFromGroup: vi.fn(),
+    revokeGroupDbAccess: vi.fn(),
     registerDatabase: vi.fn(),
     ...overrides,
   };

@@ -79,6 +79,8 @@ func NewAppWithConfig(
 	app.Handle("POST /admin/groups/members", middleware.RequireAdminAccess(app, app.handleAssignUserToGroup, app.sessionCookieSecure))
 	app.Handle("POST /admin/groups/leader", middleware.RequireAdminAccess(app, app.handleSetGroupLeader, app.sessionCookieSecure))
 	app.Handle("POST /admin/groups/permissions", middleware.RequireAdminAccess(app, app.handleSetGroupDBAccess, app.sessionCookieSecure))
+	app.Handle("DELETE /admin/groups/{groupID}/members/{userID}", middleware.RequireAdminAccess(app, app.handleRemoveGroupMember, app.sessionCookieSecure))
+	app.Handle("DELETE /admin/groups/{groupID}/databases/{dbID}/access", middleware.RequireAdminAccess(app, app.handleRevokeGroupDBAccess, app.sessionCookieSecure))
 	app.Handle("POST /admin/databases", middleware.RequireAdminAccess(app, app.handleRegisterTargetDB, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/schemas", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetSchemas, app.sessionCookieSecure))
 	app.Handle("GET /databases/{dbID}/schemas/{schema}/tables", middleware.RequireDBAccess(app, "VIEW_ONLY", app.handleGetTables, app.sessionCookieSecure))
@@ -392,6 +394,55 @@ func (app *App) handleAssignUserToGroup(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": fmt.Sprintf("berhasil memasukkan user_id %d ke group_id %d", req.UserID, req.GroupID),
 	})
+}
+
+func accessRemovalError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, accesscontrol.ErrAccessRelationNotFound):
+		writeJSONError(w, http.StatusNotFound, "Group membership or database access not found.")
+	case errors.Is(err, accesscontrol.ErrGroupLeaderRemoval):
+		writeJSONError(w, http.StatusConflict, "Replace the group leader before removing this member.")
+	case errors.Is(err, accesscontrol.ErrAccessChangeBusy):
+		writeJSONError(w, http.StatusConflict, "Access cannot be removed while a migration review or job is active.")
+	default:
+		writeJSONError(w, http.StatusInternalServerError, "Failed to update access.")
+	}
+}
+
+func (app *App) handleRemoveGroupMember(w http.ResponseWriter, r *http.Request) {
+	groupID, err := strconv.Atoi(r.PathValue("groupID"))
+	if err != nil || groupID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "Invalid group ID.")
+		return
+	}
+	userID, err := strconv.Atoi(r.PathValue("userID"))
+	if err != nil || userID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "Invalid user ID.")
+		return
+	}
+	if err := app.RemoveUserFromGroup(r.Context(), userID, groupID); err != nil {
+		accessRemovalError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (app *App) handleRevokeGroupDBAccess(w http.ResponseWriter, r *http.Request) {
+	groupID, err := strconv.Atoi(r.PathValue("groupID"))
+	if err != nil || groupID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "Invalid group ID.")
+		return
+	}
+	dbID, err := strconv.Atoi(r.PathValue("dbID"))
+	if err != nil || dbID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "Invalid database ID.")
+		return
+	}
+	if err := app.RevokeGroupDBAccess(r.Context(), groupID, dbID); err != nil {
+		accessRemovalError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (app *App) handleSetGroupDBAccess(w http.ResponseWriter, r *http.Request) {

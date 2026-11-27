@@ -134,6 +134,11 @@ export function AdminPanel({
   const [accessGroupId, setAccessGroupId] = useState("");
   const [accessDbId, setAccessDbId] = useState("");
   const [accessLevel, setAccessLevel] = useState<AccessLevel>("VIEW_ONLY");
+  const [removeGroupId, setRemoveGroupId] = useState("");
+  const [removeUserId, setRemoveUserId] = useState("");
+  const [revokeGroupId, setRevokeGroupId] = useState("");
+  const [revokeDbId, setRevokeDbId] = useState("");
+  const [removing, setRemoving] = useState(false);
 
   const [dbNameLabel, setDbNameLabel] = useState("");
   const [dbType, setDbType] = useState("postgres");
@@ -152,6 +157,30 @@ export function AdminPanel({
 
   function getFormError(form: AdminFormKey): string | null {
     return errorState?.form === form ? errorState.message : null;
+  }
+
+  async function handleRemoval(kind: "member" | "access") {
+    if (!adminService || removing) return;
+    setRemoving(true);
+    try {
+      const result = kind === "member"
+        ? await adminService.removeUserFromGroup(Number(removeUserId), Number(removeGroupId))
+        : await adminService.revokeGroupDbAccess(Number(revokeGroupId), Number(revokeDbId));
+      if (!result.ok) {
+        setSuccessMessage(null);
+        setErrorState({ form: kind === "member" ? "members" : "permissions", message: result.error });
+        return;
+      }
+      setErrorState(null);
+      setSuccessMessage(result.message ?? "Changes saved.");
+      try {
+        setGroups(await adminService.listGroups());
+      } catch {
+        setSuccessMessage("Changes saved. If your session has ended, please sign in again.");
+      }
+      if (kind === "member") { setRemoveGroupId(""); setRemoveUserId(""); }
+      else { setRevokeGroupId(""); setRevokeDbId(""); }
+    } finally { setRemoving(false); }
   }
 
   async function handleRegisterUser() {
@@ -412,6 +441,24 @@ export function AdminPanel({
               </form>
             </Card>
 
+            <Card title="Remove User from Group">
+              <form onSubmit={(event) => { event.preventDefault(); void handleRemoval("member"); }}>
+                <label htmlFor="remove-group">Group</label>
+                <select id="remove-group" value={removeGroupId} onChange={(event) => { setRemoveGroupId(event.target.value); setRemoveUserId(""); }} required>
+                  <option value="">Select group</option>
+                  {groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                </select>
+                <label htmlFor="remove-user">User</label>
+                <select id="remove-user" value={removeUserId} onChange={(event) => setRemoveUserId(event.target.value)} required>
+                  <option value="">Select member</option>
+                  {groups.find((group) => String(group.id) === removeGroupId)?.members.map((member) => <option key={member.id} value={member.id}>{member.username}</option>)}
+                </select>
+                <p className="muted">Replace the group leader before removing them.</p>
+                <AlertMessage variant="error" message={getFormError("members")} />
+                <button type="submit" disabled={removing}>Remove User</button>
+              </form>
+            </Card>
+
             <Card title="Set Group Leader">
               <form
                 onSubmit={(event) => {
@@ -562,6 +609,23 @@ export function AdminPanel({
                   message={getFormError("permissions")}
                 />
                 <button type="submit">Set Access</button>
+              </form>
+            </Card>
+
+            <Card title="Revoke Database Access">
+              <form onSubmit={(event) => { event.preventDefault(); void handleRemoval("access"); }}>
+                <label htmlFor="revoke-group">Group</label>
+                <select id="revoke-group" value={revokeGroupId} onChange={(event) => { setRevokeGroupId(event.target.value); setRevokeDbId(""); }} required>
+                  <option value="">Select group</option>
+                  {groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+                </select>
+                <label htmlFor="revoke-db">Database</label>
+                <select id="revoke-db" value={revokeDbId} onChange={(event) => setRevokeDbId(event.target.value)} required>
+                  <option value="">Select database</option>
+                  {groups.find((group) => String(group.id) === revokeGroupId)?.databaseAccess.map((access) => <option key={access.targetDbId} value={access.targetDbId}>{access.databaseName}</option>)}
+                </select>
+                <AlertMessage variant="error" message={getFormError("permissions")} />
+                <button type="submit" disabled={removing}>Revoke Access</button>
               </form>
             </Card>
 
